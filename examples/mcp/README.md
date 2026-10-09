@@ -1,0 +1,51 @@
+# MCP client examples
+
+First install Fieldkit's optional server dependency:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[mcp]'
+.venv/bin/fieldkit mcp --help
+```
+
+The extra installs Python MCP SDK version `>=2.3,<3`, matching Fieldkit's server API.
+
+These examples are configuration templates. They are not active agent configuration.
+
+## Copilot and portable clients
+
+Copy [portable.mcp.json](portable.mcp.json) to `.mcp.json` at your workspace root,
+or merge its `fieldkit` entry into an existing configuration. Replace both
+`/absolute/path/to/CPTC-Fieldkit` values with your actual checkout path. The
+`mcpServers` format also works with compatible local stdio clients; consult your
+client's configuration reference before choosing its configuration location.
+
+VS Code currently recommends this portable workspace format for new servers.
+Copilot also documents a user configuration at `~/.copilot/mcp-config.json` when
+`COPILOT_HOME` is unset. These locations and formats are described in the
+[official VS Code MCP setup documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+
+## VS Code workspace format
+
+The alternative [vscode.mcp.json](vscode.mcp.json) uses VS Code's `servers` object
+and `${workspaceFolder}` substitution. Copy it to `.vscode/mcp.json`, or merge the
+entry into that file. It assumes Fieldkit is installed in the workspace's `.venv`.
+For a different environment, change `command` to its absolute `fieldkit` path.
+
+Start Fieldkit from the client's MCP server list, then enable its tools in your
+agent's tool picker. Follow the client's workspace/server trust prompts. VS Code's
+MCP logs are available through **MCP: List Servers → Fieldkit → Show Output**.
+
+An initial agent instruction can be:
+
+> Use Fieldkit to list the available modules and inspect evidence/ingest's options.
+> Import examples/workbench/traffic.har into artifacts/demo.sqlite, inspect the
+> saved job report, then list the public request records. Do not contact the example
+> hosts; this is a local evidence review.
+
+All modules expose their existing settings under an `options` object using uppercase
+option names, except server-controlled `OUTPUT`. Set the MCP output location in the
+server's startup arguments. The same explicit target origins, profile files, limits, and confirmation
+flags apply to network requests. Keep populated profiles and credentials in private
+files rather than adding them to shared MCP configuration. See [the MCP guide](../../docs/mcp.md)
+for tools, job polling, result pagination, and private evidence handling.

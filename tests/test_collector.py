@@ -72,7 +72,7 @@ def webserver():
 def scan(tmp_path, targets, **overrides):
     module = WebArtifacts()
     settings = module.defaults()
-    settings.update(TARGETS=targets, OUTPUT=str(tmp_path), **overrides)
+    settings.update(TARGETS=targets, OUTPUT=str(tmp_path), RATE=0, RETRIES=0, **overrides)
     code = module.run(settings, Console(file=io.StringIO()))
     manifest = next(tmp_path.glob("*/report.json"))
     return code, json.loads(manifest.read_text()), manifest.parent
@@ -119,7 +119,10 @@ def test_reports_redirect_limits_missing_denied_and_oversized(webserver, tmp_pat
     assert results["/forbidden.bak"]["status"] == 403
     assert results["/forbidden.bak"]["verdict"] == "http_error"
     assert results["/missing.txt"]["verdict"] == "missing"
-    assert len(list(root.glob("*/*"))) == 1
+    saved = [r for r in results.values() if r["verdict"] == "saved"]
+    assert len(saved) == 1
+    assert (root / saved[0]["file"]).is_file()
+    assert len(list((root / "evidence").glob("*.json"))) == 7
 
 
 def test_multiple_targets_and_cli_target_file(webserver, tmp_path):
@@ -140,6 +143,10 @@ def test_multiple_targets_and_cli_target_file(webserver, tmp_path):
             "/robots.txt",
             "--no-discover-js",
             "--no-backups",
+            "--rate",
+            "0",
+            "--retries",
+            "0",
         ]
     )
     assert code == 0

@@ -3,21 +3,18 @@
 import asyncio
 import hashlib
 import html
-import math
 import uuid
 from collections import Counter
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
 
-import httpx
 from rich.console import Console
 
-from fieldkit import __version__
+from fieldkit.core.assessment import COMMON_OPTIONS, NetworkModule
 from fieldkit.core.http import Fetcher, FetchResult, origin
-from fieldkit.core.module import Module, Option
-from fieldkit.core.storage import ArtifactStore, utc_now
-from fieldkit.core.targets import read_targets, target_urls
+from fieldkit.core.module import Option
+from fieldkit.core.storage import ArtifactStore
 
 DEFAULT_PATHS = (
     "/robots.txt",
@@ -126,65 +123,21 @@ def fingerprint(result: FetchResult) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-class WebArtifacts(Module):
+class WebArtifacts(NetworkModule):
     name = "web/artifacts"
     description = "Collect robots, security, secrets, sitemaps, JavaScript, and backup files."
-    accepts_targets = True
-    options = (
-        Option("TARGETS", list, [], "Hostnames, IPs, or HTTP(S) origins", "--target"),
-        Option(
-            "TARGETS_FILE", str, "", "File of targets (one per line; # comments)", "--targets-file"
-        ),
-        Option("OUTPUT", str, "artifacts", "Parent directory for a unique run folder", "--output"),
-        Option(
-            "SCHEME", str, "auto", "auto, https, or http for targets without a scheme", "--scheme"
-        ),
-        Option("PATHS", list, [], "Extra root-relative paths (repeat this flag)", "--path"),
+    options = COMMON_OPTIONS + (
         Option("PATHS_FILE", str, "", "File of extra root-relative paths", "--paths-file"),
-        Option(
-            "ONLY_CUSTOM", bool, False, "Skip built-in paths; use supplied paths", "--only-custom"
-        ),
-        Option(
-            "DISCOVER_JS", bool, True, "Discover scripts from the target homepage", "--discover-js"
-        ),
-        Option("BACKUPS", bool, True, "Also probe .bak variants of candidate files", "--backups"),
-        Option(
-            "SOFT_404", bool, True, "Compare successful bodies against a missing page", "--soft-404"
-        ),
-        Option(
-            "CONCURRENCY", int, 8, "Maximum simultaneous requests across targets", "--concurrency"
-        ),
-        Option(
-            "TIMEOUT",
-            float,
-            10.0,
-            "Wall-clock seconds per request, including redirects",
-            "--timeout",
-        ),
-        Option("MAX_BYTES", int, 5242880, "Maximum decoded bytes per response", "--max-bytes"),
+        Option("ONLY_CUSTOM", bool, False, "Skip built-in paths", "--only-custom"),
+        Option("DISCOVER_JS", bool, True, "Discover scripts from the homepage", "--discover-js"),
+        Option("BACKUPS", bool, True, "Probe .bak variants of candidate files", "--backups"),
+        Option("SOFT_404", bool, True, "Compare bodies with a missing-page baseline", "--soft-404"),
         Option("MAX_JS", int, 100, "Maximum discovered script URLs per target", "--max-js"),
-        Option("INSECURE", bool, False, "Disable TLS certificate verification", "--insecure"),
     )
 
-    def run(self, settings: dict[str, Any], console: Console) -> int:
-        targets = read_targets(settings["TARGETS"], settings["TARGETS_FILE"])
-        if settings["SCHEME"] not in {"auto", "http", "https"}:
-            raise ValueError("SCHEME must be auto, http, or https")
-        for name in ("CONCURRENCY", "TIMEOUT", "MAX_BYTES", "MAX_JS"):
-            if not math.isfinite(settings[name]) or settings[name] <= 0:
-                raise ValueError(f"{name} must be a finite positive number")
-        # Validate all inputs before any request or output-directory creation.
-        normalized: list[tuple[str, list[str]]] = []
-        seen: set[tuple[str, ...]] = set()
-        for target in targets:
-            urls = target_urls(target, settings["SCHEME"])
-            try:
-                key = tuple(str(httpx.URL(url)) for url in urls)
-            except httpx.InvalidURL as exc:
-                raise ValueError(f"Invalid target: {target}: {exc}") from exc
-            if key not in seen:
-                normalized.append((target, list(key)))
-                seen.add(key)
+    def validate(self, settings):
+        if settings["MAX_JS"] <= 0:
+            raise ValueError("MAX_JS must be positive")
         paths = list(settings["PATHS"])
         if settings["PATHS_FILE"]:
             from pathlib import Path
@@ -194,80 +147,67 @@ class WebArtifacts(Module):
                 for line in Path(settings["PATHS_FILE"]).expanduser().read_text().splitlines()
                 if line.strip() and not line.lstrip().startswith("#")
             )
-        paths = list(dict.fromkeys(validate_path(path) for path in paths))
-        if settings["ONLY_CUSTOM"] and not paths:
-            raise ValueError("--only-custom requires --path or --paths-file")
-        store = ArtifactStore(settings["OUTPUT"])
-        report: dict[str, Any] = {
-            "schema_version": 1,
-            "module": self.name,
-            "started_at": utc_now(),
-            "completed": False,
-            "settings": settings,
-            "targets": [],
-        }
-        console.print(f"Run directory: {store.root}", markup=False)
-        interrupted = False
+        self._paths = list(dict.fromkeys(validate_path(path) for path in paths))
+        if settings["ONLY_CUSTOM"] and not self._paths and not settings["INVENTORY"]:
+            raise ValueError("--only-custom requires --path, --paths-file, or --inventory")
+
+    async def _execute(self, ctx):
+        # Collector keeps its per-target probes/manifest for backward compatibility.
+        async with ctx:
+            async with asyncio.timeout(ctx.settings["BUDGET"]):
+                await self.assess(ctx)
+
+    async def assess(self, ctx):
+        ctx.report["targets"] = []
+        queue = asyncio.Queue()
+        for urls in ctx.candidates:
+            queue.put_nowait(urls)
+
+        class Transport:
+            async def get(self, url, allowed_origin):
+                return await ctx.fetch(url, record_errors=False)
+
+        async def worker():
+            while not queue.empty():
+                urls = queue.get_nowait()
+                paths = list(self._paths)
+                # Imported candidates remain constrained to this target origin.
+                for entry in ctx.imported_endpoints:
+                    if origin(entry["url"]) in {origin(url) for url in urls}:
+                        parsed = urlsplit(entry["url"])
+                        paths.append(parsed.path + ("?" + parsed.query if parsed.query else ""))
+                await self._scan_target(
+                    urls[0],
+                    list(urls),
+                    paths,
+                    ctx.settings,
+                    Transport(),
+                    ctx.store,
+                    ctx.report,
+                    ctx.console,
+                )
+                queue.task_done()
+
         try:
-            asyncio.run(self._scan(normalized, paths, settings, store, report, console))
-            report["completed"] = True
-        except KeyboardInterrupt:
-            interrupted = True
-            console.print("Scan interrupted; saving partial report.")
-        finally:
-            report["finished_at"] = utc_now()
-            manifest = store.write_report(report)
-            console.print(f"Report: {manifest}", markup=False)
-        if interrupted:
-            return 130
-        return 1 if any(t["had_errors"] for t in report["targets"]) else 0
-
-    async def _scan(
-        self,
-        targets: list[tuple[str, list[str]]],
-        paths: list[str],
-        settings: dict[str, Any],
-        store: ArtifactStore,
-        report: dict,
-        console: Console,
-    ) -> None:
-        async with httpx.AsyncClient(
-            verify=not settings["INSECURE"],
-            timeout=settings["TIMEOUT"],
-            follow_redirects=False,
-            trust_env=False,
-            headers={"User-Agent": f"Fieldkit/{__version__} (web artifact collector)"},
-            limits=httpx.Limits(max_connections=settings["CONCURRENCY"]),
-        ) as client:
-            fetcher = Fetcher(
-                client,
-                settings["CONCURRENCY"],
-                settings["MAX_BYTES"],
-                settings["TIMEOUT"],
-            )
-            # Limit target workers too: a large targets file does not spawn unbounded tasks.
-            queue: asyncio.Queue = asyncio.Queue()
-            for target in targets:
-                queue.put_nowait(target)
-
-            async def worker() -> None:
-                while not queue.empty():
-                    target, urls = queue.get_nowait()
-                    await self._scan_target(
-                        target,
-                        urls,
-                        paths,
-                        settings,
-                        fetcher,
-                        store,
-                        report,
-                        console,
-                    )
-                    queue.task_done()
-
             await asyncio.gather(
-                *(worker() for _ in range(min(settings["CONCURRENCY"], len(targets))))
+                *(worker() for _ in range(min(ctx.settings["CONCURRENCY"], len(ctx.candidates))))
             )
+        finally:
+            for target in ctx.report["targets"]:
+                ctx.targets.append(target["origin"])
+                ctx.report["results"].extend(target["results"])
+                if target["had_errors"]:
+                    ctx.report["errors"].append(
+                        {"url": target["origin"], "error": "candidate_errors"}
+                    )
+                for result in target["results"]:
+                    if result["verdict"] == "saved":
+                        ctx.add_endpoint(
+                            result["requested_url"],
+                            content_type=result["content_type"],
+                            file=result["file"],
+                        )
+            ctx.report["target_origins"] = ctx.targets
 
     async def _scan_target(
         self,
@@ -294,11 +234,11 @@ class WebArtifacts(Module):
         for base in urls:
             home = await fetcher.get(base, base)
             entry["probes"].append(self._record(home, "homepage"))
-            if home.error != "network_error":
+            if home.error not in {"network_error", "profile_scope"}:
                 break
         assert home is not None
         entry["origin"] = base
-        if home.error == "network_error" and len(urls) > 1:
+        if home.error in {"network_error", "profile_scope"} and len(urls) > 1:
             entry["had_errors"] = True
             entry["completed"] = True
             console.print(f"[error] {target}: {home.detail}", markup=False)
@@ -392,4 +332,5 @@ class WebArtifacts(Module):
             "content_type": result.content_type,
             "error": result.error,
             "detail": result.detail,
+            "evidence": [result.evidence_id],
         }

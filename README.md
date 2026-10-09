@@ -1,12 +1,15 @@
 # Fieldkit
 
-A modular Python toolkit for team assessments, with a direct CLI and a
-Metasploit-style interactive terminal console. The first module, `web/artifacts`,
-collects web files for manual review. Python 3.11 or newer is required.
+A modular Python toolkit for CPTC team assessments, with direct commands and a
+Metasploit-style interactive terminal console, plus an optional MCP server for AI agents.
+Fieldkit inventories web applications and
+Linux hosts, replays selected requests, and correlates captured traffic and artifacts in
+a private local evidence vault. It preserves evidence for manual review.
+Python 3.11 or newer is required.
 
 ## Download and install
 
-Install Git and Python 3.11 or newer, including Python's `venv` support. Then run:
+Install Git and Python with `venv` support, then run:
 
 ```bash
 git clone https://github.com/SNO2207/CPTC-Fieldkit.git
@@ -15,30 +18,30 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 fieldkit --help
+fieldkit modules
 ```
 
-## Run
-
-From the cloned repository, with the virtual environment activated:
+For browser screenshots or explicit browser login, install the optional browser extra and Chromium:
 
 ```bash
-# Start the interactive terminal console.
-fieldkit console
-
-# Or collect files directly from your targets.
-fieldkit collect app.example.test 192.0.2.10
-
-# Or use a target list.
-fieldkit collect --targets-file targets.txt --output artifacts
+python -m pip install -e '.[browser]'
+python -m playwright install chromium
 ```
 
-Replace the example targets with your competition targets. Downloads and the JSON
-report are saved in a unique subdirectory of `artifacts/` by default. See below
-for the target-list format, console commands, and collection options.
+If Chromium reports missing system libraries, follow Playwright's platform-specific
+installation output. Metadata-only snapshots work with `--no-screenshot` without the
+browser extra. Other modules run without Chromium. Nuclei execution requires an
+operator-installed Nuclei v3 binary; JSONL import does not. PDF extraction optionally
+uses `pdftotext` from Poppler. Missing Linux commands produce coverage errors rather
+than triggering installation. See [capability setup](docs/capabilities.md).
 
-In a new terminal, return to the cloned repository and run
-`source .venv/bin/activate` again. Alternatively, use `.venv/bin/fieldkit` directly
-without activating the environment. Run `deactivate` when finished.
+The optional `web/ffuf` adapter uses an operator-installed ffuf 2.1 binary for active
+runs; imports work without it. The [Burp capture extension](extensions/burp/README.md)
+builds with a Java 17+ JDK and the Montoya API JAR. Native parameter discovery and JWT
+review run in the Python environment. See the [agent assessment tools guide](docs/agent-assessment-tools.md).
+
+In a new terminal, return to the checkout and run `source .venv/bin/activate` again.
+Alternatively, run `.venv/bin/fieldkit` directly. Use `deactivate` when finished.
 
 To update an existing checkout:
 
@@ -48,151 +51,296 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-## Collect files
+## Use Fieldkit from Copilot or another MCP agent
+
+Install the optional MCP extra into the same environment:
 
 ```bash
-# Multiple names, IPs, and explicit origins; use your competition targets.
-fieldkit collect app.example.test 192.0.2.10 http://192.0.2.11:8080
-
-# Load a team target list; select HTTP for targets without an explicit scheme.
-fieldkit collect --targets-file targets.txt --scheme http --output artifacts/round1
-
-# Include known application paths and a path wordlist.
-fieldkit collect http://localhost:8080 \
-  --path /assets/custom.js --path /settings.ini.bak --paths-file paths.txt
-
-# Focus on exactly the supplied paths.
-fieldkit collect http://localhost:8080 --only-custom \
-  --path /robots.txt --path /app.js --no-discover-js --no-backups
-
-# Generic module invocation uses the same options.
-fieldkit run web/artifacts http://localhost:8080
+python -m pip install -e '.[mcp]'
+fieldkit mcp --help
 ```
 
-Targets can also be repeated with `--target`. Target lists accept one target per
-line, whitespace-separated or comma-separated entries, blank lines, and full-line
-`#` comments. URLs must be HTTP(S) origins without paths, queries, credentials, or
-fragments. IPv6 accepts bare addresses or bracketed addresses with ports:
-`::1`, `[::1]:8080`, `http://[::1]:8080`. CIDR expansion is not implemented.
-Extra path files accept one root-relative path per line and full-line `#` comments.
+The local stdio server exposes every registered module as a typed tool, with job
+status, cancellation, redacted report/evidence reads, and public vault records.
+Use the [Copilot/VS Code configuration examples](examples/mcp/README.md) to connect
+your agent. The client starts the server; `fieldkit mcp --workspace /absolute/project`
+is also available directly. Network tools still require explicit target origins and
+the same session profiles and module controls as the CLI.
+
+See [MCP setup and tool usage](docs/mcp.md) for a complete ingest-to-report example,
+job limits, and the boundary between agent-readable results and private raw evidence.
+
+## Run commands or use the console
+
+```bash
+# Collect files from multiple hostnames/IPs.
+fieldkit collect app.example.test 192.0.2.10 http://192.0.2.11:8080
+
+# Load origins from a file.
+fieldkit collect --targets-file targets.txt --output artifacts
+
+# Run any module by name.
+fieldkit run web/header-review https://app.example.test --path /account
+fieldkit run web/site-map --help
+
+# Start the interactive console.
+fieldkit console
+```
+
+Replace example targets with your competition targets. The console exposes the same
+modules and options as the direct CLI:
 
 ```text
-# targets.txt
+fieldkit > modules
+fieldkit > use web/site-map
+fieldkit (web/site-map) > set TARGETS https://app.example.test http://192.0.2.10
+fieldkit (web/site-map) > set MAX_PAGES 100
+fieldkit (web/site-map) > set RATE 5
+fieldkit (web/site-map) > show options
+fieldkit (web/site-map) > run
+fieldkit (web/site-map) > back
+fieldkit > exit
+```
+
+Use `help`, `search`, `info`, `unset OPTION`, and tab completion. `set` replaces the
+option value; list options accept space-separated values in the console and repeated
+flags in direct commands. Quote values containing spaces. Ctrl-C saves a partial
+network-run report and returns to the console. History is kept in memory only.
+
+## Modules
+
+| Module | Purpose |
+| --- | --- |
+| `web/artifacts` | Collect robots, security, secrets, sitemaps, JavaScript, and backup files. Also available as `fieldkit collect`. |
+| `web/js-review` | Review downloaded scripts and source maps for endpoints, routes, hostnames, and possible secrets. |
+| `web/site-map` | Bounded crawling of links, forms, robots paths, and sitemap documents. |
+| `web/content-discovery` | Probe wordlists and extension variants with wildcard/soft-404 filtering. |
+| `web/auth-compare` | Compare endpoint responses across supplied session profiles. |
+| `web/session-check` | Review cookies and optionally execute explicit login/logout sequences. |
+| `web/header-review` | Contextual checks of security headers, cookie attributes, caching, and disclosures. |
+| `web/cors-check` | Inspect origin handling, credentials, and OPTIONS preflight policies. |
+| `web/api-inventory` | Parse OpenAPI/Swagger JSON or YAML into endpoints and request templates. |
+| `web/parameter-map` | Inventory query/form/API/JS parameter names, with optional GET marker reflection. |
+| `web/parameter-discovery` | Discover unknown fields in selected captured requests with working baselines, unknown-name controls, and repeated confirmation. |
+| `web/jwt-check` | Review private JWTs offline or run explicit protected-resource validation tests with missing/invalid-token controls. |
+| `web/ffuf` | Import ffuf output or fuzz one selected saved request through a bounded, scoped HTTP relay. |
+| `web/tls-review` | Inspect certificate trust, hostname coverage, dates, and negotiated TLS versions. |
+| `web/snapshot` | Capture titles, response metadata, screenshots, and a local HTML gallery. |
+| `web/report-export` | Generate a Markdown draft and evidence index from one or more reports. |
+| `results/compare` | Show added, removed, and changed observations across two runs. |
+| `results/merge` | Deduplicate team reports while retaining conflicting evidence and review decisions. |
+| `results/review` | Assign a finding and record its review status in a new report. |
+| `linux/inventory` | Collect read-only host, permission, service, process, listener, mount, and container evidence. |
+| `linux/exposure-audit` | Inspect explicit filesystem roots for redacted credential/file exposure candidates. |
+| `network/nmap-import` | Import bounded Nmap XML and selected HTTP services without scanning. |
+| `web/nuclei` | Import JSONL or execute explicitly selected, reviewed static HTTP templates. |
+| `web/request-replay` | Replay selected JSON/raw/vault requests with field edits and controls. |
+| `web/ssrf-check` | Correlate selected callback probes with actual listener receipts. |
+| `web/xxe-check` | Compare selected XML entity probes with external callback/content evidence. |
+| `web/sqli-check` | Collect error/boolean and optional bounded timing comparisons. |
+| `web/soap-inventory` | Parse WSDL 1.1/SOAP bindings and generate unexecuted request templates. |
+| `web/auth-matrix` | Compare explicit identities, known resources, and expected authorization rules. |
+| `web/session-workflow` | Extract HTML/JSON tokens and preserve session continuity through explicit steps. |
+| `web/browser-login` | Perform optional interactive same-origin login and export a private HTTP profile. |
+| `evidence/ingest` | Import HAR, Burp XML, raw HTTP, reports, documents, and artifacts into SQLite. |
+| `web/request-vault` | Filter captured requests by host/user/role/tag and export selected private templates. |
+| `web/routes` | Merge traffic, JavaScript, OpenAPI, and Actuator routes with provenance. |
+| `web/ids` | Link typed response identifiers to observed subsequent request fields. |
+| `web/host-resolver` | Distinguish captured host/IP/SNI/redirect properties and generate `curl --resolve`. |
+| `web/actuator-analyze` | Review captured configuration, mapping, dependency, and secret exposures. |
+| `artifacts/triage` | Inspect bounded Base64/compression/archive transformations and format signatures. |
+| `web/workflow-verify` | Verify a legitimate baseline before one explicitly authorized field modification. |
+| `web/auth-flow-map` | Map captured OIDC, redirect, PKCE, and unverified token claims. |
+| `evidence/correlate` | Correlate redacted secret fingerprints and dependency candidates. |
+| `artifacts/serialization` | Link likely serialization formats and dependencies to baseline-gated review leads. |
+| `evidence/hypotheses` | Preserve supporting evidence, counterevidence, and the next test for a lead. |
+| `evidence/report` | Draft evidence-linked findings with validation status, impact, and remediation notes. |
+| `integrations/burp-bridge` | Receive explicitly selected Burp exchanges into the private vault through an authenticated loopback listener. |
+
+Detailed usage:
+
+- [Discovery, content enumeration, APIs, and parameters](docs/discovery.md)
+- [Authentication, sessions, headers, CORS, and profile examples](docs/assessment.md)
+- [JavaScript review, report export, comparisons, and team review](docs/offline.md)
+- [TLS inspection and browser snapshots](docs/platform.md)
+- [Linux, tool imports, replay, injection, SOAP, and authenticated workflows](docs/capabilities.md)
+- [Private request vault, correlation, artifact workbenches, and reporting](docs/evidence-workbench.md)
+- [MCP tools for Copilot and other AI agents](docs/mcp.md)
+- [Parameter discovery, JWT checks, selected Burp captures, and ffuf](docs/agent-assessment-tools.md)
+- [Architecture and module authoring](docs/architecture.md)
+
+## Chain modules through an inventory
+
+Every network run prints its unique output directory. Substitute that directory for
+`RUN` in subsequent commands:
+
+```bash
+fieldkit run web/site-map https://app.example.test --output artifacts
+fieldkit run web/header-review https://app.example.test \
+  --inventory artifacts/RUN/inventory.json
+fieldkit collect https://app.example.test --output artifacts
+fieldkit run web/js-review --input artifacts/RUN/report.json
+fieldkit run web/report-export --input artifacts/RUN/report.json --output exports
+```
+
+`--inventory` accepts an inventory or assessment report and is repeatable. Explicit
+target origins still define network scope: imported URLs do not authorize new hosts.
+Offline JS review, exports, comparisons, merges, and review updates do not require
+network targets. Module-specific documentation covers method-aware inventory handling.
+
+## Targets and session profiles
+
+Targets can be hostnames, IP addresses, or HTTP(S) origins with ports. Targets must
+not include paths, credentials, queries, or fragments; use `--path` for endpoints.
+IPv6 supports `::1`, `[::1]:8080`, and `http://[::1]:8080`. CIDR expansion is not implemented.
+
+```text
+# targets.txt — blank lines and full-line comments are allowed
 app.example.test
 192.0.2.10
 http://192.0.2.11:8080
 ```
 
-## Interactive console
+Target lists also accept whitespace/comma-separated values. Positional targets,
+`--target`, and `--targets-file` are combined and deduplicated.
 
-Run `fieldkit` or `fieldkit console`. The console provides tab completion,
-in-memory command history, and formatted module settings.
+Named profiles supply reusable cookies and headers without entering credentials in
+command history. See [examples/profiles.example.json](examples/profiles.example.json).
+Each credential-bearing profile requires explicit allowed origins. Profiles have
+isolated cookie jars, and redirects remain on the current request's origin.
 
-```text
-fieldkit > modules
-fieldkit > use web/artifacts
-fieldkit (web/artifacts) > set TARGETS app.example.test 192.0.2.10
-fieldkit (web/artifacts) > set TARGETS_FILE targets.txt
-fieldkit (web/artifacts) > set OUTPUT artifacts/round1
-fieldkit (web/artifacts) > set INSECURE true
-fieldkit (web/artifacts) > options
-fieldkit (web/artifacts) > run
-fieldkit (web/artifacts) > back
-fieldkit > exit
+```bash
+fieldkit run web/auth-compare https://app.example.test \
+  --profiles-file profiles.json --reference-profile admin --path /account
 ```
 
-`TARGETS` and `TARGETS_FILE` are combined. `set` replaces an option's previous
-value; `unset OPTION` restores its default. Quote values containing spaces.
-`search`, `info`, `show options`, and `help` are also available. Ctrl-C interrupts
-a scan and writes a partial report; the console remains available.
+`anonymous` is built in. Keep your populated profile/sequence files local; the repository
+ignores `profiles.json`, `sequence.json`, and `*.local.json`. Logout sequences can revoke
+the supplied server-side session. No module guesses account passwords or performs login
+steps unless those requests are explicitly supplied in a sequence file.
 
-## What the first module checks
+## Common request controls
 
-- `robots.txt`, `security.txt`, `.well-known/security.txt`, and `secrets.txt`.
-- `sitemap.xml` and `sitemap_index.xml`.
-- Literal `/JS`, `/JS/`, `/js/`, `/.js`, and `/.bak` paths, plus a small built-in
-  list of common JavaScript and backup filenames.
-- Same-origin `<script src>` references and `.js` / `.mjs` `<link href>` references
-  from the homepage, including references resolved through HTML `<base>`.
-- `.bak` suffixes on candidate file paths, including discovered script paths.
-- Additional paths supplied with `--path` and `--paths-file`.
-
-An extension such as `.js` or `.bak` is not a wildcard URL. This module probes
-literal and known filenames and discovers homepage script URLs. It does not
-enumerate every possible filename, execute JavaScript, recurse into script
-imports, parse sitemaps, or crawl links from robots files. Collected content is
-saved for manual review; a filename does not establish that a secret exists.
-
-## Network behavior and limits
-
-| Setting | Default | Behavior |
+| Option | Default | Behavior |
 | --- | --- | --- |
-| `--scheme` | `auto` | Try HTTPS, then HTTP if the homepage HTTPS request fails at the network/TLS layer. Explicit URL schemes take precedence. |
-| `--concurrency` | `8` | Maximum simultaneous requests across all targets. |
-| `--timeout` | `10` | Total seconds per request, including redirects and body transfer. |
-| `--max-bytes` | `5242880` | Decoded response body limit; oversized bodies are recorded without saving a partial file. |
-| `--max-js` | `100` | Maximum homepage-discovered script URLs per target. |
-| `--insecure` | off | Opt in to unverified TLS for lab certificates. |
-| `--discover-js` | on | Use `--no-discover-js` to skip homepage script discovery. |
-| `--backups` | on | Use `--no-backups` to skip generated `.bak` variants. Built-in backup paths still run unless `--only-custom` is used. |
-| `--soft-404` | on | Compare successful bodies to one random missing-page response. |
+| `--scheme` | `auto` | Bare origins try HTTPS, then HTTP on a network/TLS failure. Explicit schemes take precedence. |
+| `--concurrency` | `8` | Maximum simultaneous HTTP requests across profiles and targets. Individual modules may run sequentially. |
+| `--rate` | `5` | Maximum request starts per second per origin; `0` disables pacing. |
+| `--timeout` | `10` | Seconds per HTTP attempt, including redirects and pacing waits. |
+| `--retries` | `1` | Extra GET/HEAD/OPTIONS attempts on network errors or HTTP 429/502/503/504; mutation requests are not retried. |
+| `--budget` | `300` | Total run time in seconds; expiry writes an incomplete report. |
+| `--max-bytes` | `5242880` | Maximum decoded bytes per HTTP response. |
+| `--insecure` | off | Disable HTTPS certificate verification for lab certificates. |
+| `--database` | unset | Also retain raw HTTP request/response context in an explicit private SQLite vault. |
+| `--dry-run` | off | Validate inputs and save a plan without requests or external-tool execution. |
 
-Redirects are limited to five hops and to the selected origin (scheme, hostname,
-and port). Cross-origin redirects are reported; supply the destination origin as
-another target if needed. A homepage redirect or non-success status does not
-prevent checks of explicit paths. With an explicit scheme, even a homepage network
-failure allows candidate checks to continue; automatic scheme selection skips a
-target if both homepage requests fail. The scanner issues GET requests, does not retry,
-and ignores environment proxy settings. Cookies are managed by the HTTP client
-using standard cookie scope; authentication and custom headers are not yet exposed.
+HTTP redirects are limited to five hops and the same scheme/hostname/port. Supplied
+origins are the scope boundary for discovered URLs. Environment proxy settings are
+ignored. TLS negotiation has its own socket timeout and uses the shared pacing and run
+budget. Snapshot browser requests are routed through the shared transport; explicit
+browser login uses Playwright's own transport with same-origin routing and a bounded
+login wait. Nuclei uses its own rate/concurrency/timeout controls. These two transports
+do not inherit the shared HTTP request scheduler. The original collector has its own
+options and does not expose the new database/dry-run flags. Modules also have explicit
+crawl, candidate, page, operation, or file limits.
 
-Soft-404 detection compares response bodies after replacing reflected request
-URLs and paths. It is a heuristic: dynamic errors, login pages, and application
-fallbacks can still be saved. HTML responses receive a review note. Disable the
-heuristic with `--no-soft-404` to save all successful responses. This implementation
-does not claim to prove file existence based on HTTP status alone.
+Parameter discovery, JWT checks, and active ffuf use zero retries and do not follow
+redirects. Parameter discovery needs an explicit target scheme or a fixed `--scheme`;
+JWT and ffuf request scope requires explicit HTTP(S) origins. ffuf's local relay sends
+target requests through the shared HTTP scheduler and TLS verification. The Burp
+bridge receives selected captures without sending requests to their origins.
 
-## Output
+## Work with captured evidence
 
-```text
-artifacts/
-  20260925T020000Z-a1b2c3d4/
-    report.json
-    http_localhost_8080-<target-hash>/
-      robots.txt--<url-hash>
-      app.js--<url-hash>
+These commands inspect sanitized local examples without contacting their example hosts:
+
+```bash
+fieldkit ingest har examples/workbench/traffic.har --database artifacts/demo.sqlite \
+  --user example-employee --role employee --tag shipment
+fieldkit ingest actuator examples/workbench/actuator.json \
+  --database artifacts/demo.sqlite --host vendor.example.test
+fieldkit web routes --database artifacts/demo.sqlite --host vendor.example.test
+fieldkit web ids --database artifacts/demo.sqlite --route '/shipment-jobs/{id}/export'
+fieldkit inspect artifact examples/workbench/serialized-export.txt \
+  --database artifacts/demo.sqlite --host vendor.example.test
+fieldkit findings draft --database artifacts/demo.sqlite
 ```
 
-Every invocation creates a unique run directory. Names are sanitized and include
-URL hashes to distinguish hosts, paths, and query strings. Response bodies are
-saved after HTTP decompression. The run directory is private and files are owner
-read/write on POSIX systems. File extensions are followed by a hash; the report
-maps each file to its exact requested and final URL.
+Importing evidence grants no network scope. Replay requires explicit target origins
+and request IDs. `workflow baseline --request ID` additionally requires a resource
+expectation file; see [the workflow gate](docs/evidence-workbench.md#verify-a-legitimate-baseline).
 
-`report.json` includes settings, timestamps, completion flags, homepage and
-missing-page probes, candidate status codes, content types, verdicts, saved paths,
-byte counts, and SHA-256 hashes. Paths are relative to the report directory.
-No response headers containing cookies are included. Verdicts include `saved`,
-`missing`, `soft_404`, `http_error`, `network_error`, `blocked_redirect`,
-`redirect_error`, and `too_large`.
+## Original file collector
 
-Exit statuses: `0` = scan completed without candidate errors (missing files and
-soft 404s are normal), `1` = unreachable target or candidate request/HTTP error,
-`2` = invalid input or filesystem failure, `130` = interrupted. A `403` indicates
-access was denied; it is recorded without assuming the file exists or is missing.
-Reports from interrupted or failed runs have `completed: false`.
+`web/artifacts` checks `/robots.txt`, `/.well-known/security.txt`, `/security.txt`,
+`/secrets.txt`, `/sitemap.xml`, `/sitemap_index.xml`, literal `/JS`, `/JS/`, `/js/`,
+`/.js`, and `/.bak`, common script/backup filenames, homepage script references, and
+`.bak` suffix variants. An extension is not a wildcard: use content discovery and
+custom paths for broader coverage.
+
+```bash
+fieldkit collect http://localhost:8080 --path /assets/custom.js --paths-file paths.txt
+fieldkit collect http://localhost:8080 --only-custom --path /robots.txt \
+  --no-discover-js --no-backups
+```
+
+Path files contain one root-relative path per line with optional full-line `#` comments.
+`--no-soft-404` disables missing-page body comparison. Heuristics can miss dynamic login
+or fallback pages; HTML downloads receive a review note. Collected files are saved
+without executing them or modifying their content.
+
+## Output and evidence
+
+```text
+artifacts/UNIQUE_RUN/
+  report.json               # versioned findings, results, errors, and settings
+  inventory.json            # endpoints for subsequent modules
+  evidence/evidence-*.json  # request/response metadata and bounded body previews
+  ...                       # module-specific files, screenshots, certificates, templates
+```
+
+Network reports use schema version 2; the collector also retains its per-target
+`targets[].results` structure. Export/merge tools accept legacy schema version 1.
+Downloaded artifacts have sanitized, hash-suffixed filenames. Files and run directories
+use owner-only permissions on POSIX. Saved artifacts include byte counts and SHA-256.
+
+Evidence redacts configured credentials, learned cookies, recognized secret patterns,
+and secrets discovered later in the run. Previews are limited to 32 KiB. Redaction is
+heuristic for arbitrary content. Raw downloaded files and screenshots remain original
+assessment evidence and can contain sensitive information; exports reference original
+artifacts instead of copying them. Preserve run directories when sharing reports with
+teammates. Inventories preserve exact local URLs for chaining, including query values.
+The optional SQLite vault, its `.private/` blobs, `private-request-templates.json`,
+`private-session-profile.json`, and retained Linux `private-raw/` files deliberately
+preserve original data and may contain credentials. They use owner-only POSIX permissions
+and are not encrypted. Redacted reports are separate from these private sources.
+
+Findings distinguish observations and review leads. Similar responses do not prove broken
+access control; reflection does not prove XSS; a credential-shaped string does not prove
+that a credential is valid. Record manual confirmation using `results/review`.
+
+Network exit statuses: `0` = completed without transport/module errors, `1` = errors or
+budget exhaustion, `2` = invalid input/filesystem failure, `130` = interrupted. HTTP
+statuses such as 403 are ordinary observations for assessment modules; the original
+collector retains its candidate HTTP-error behavior. Inspect `completed` before treating
+a report as a complete scan. Local collection and vault workbenches return `1` when
+coverage/import errors occur after a report has been created; invalid options return `2`.
+Older offline results commands retain their existing exit behavior.
 
 ## Development
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,browser,mcp]'
+python -m playwright install chromium
 python -m pytest
-python -m ruff check .
-python -m ruff format --check .
+python -m ruff check src tests
+python -m ruff format --check src tests
 ```
 
-See [architecture and module authoring](docs/architecture.md). Tests use local
-HTTP servers and mock transports; they do not contact external targets.
-
-Web collection is the first implemented capability. The module interface is
-intended to accommodate Linux assessment modules next; none are included yet.
+Tests use local HTTP/TLS servers, mocked transports, temporary files, captured outputs,
+and fake executables, never external assessment targets. Browser and real-tool integration
+tests skip when their optional runtimes are unavailable. There are 45 explicitly
+registered modules. The downloaded reference toolkit stays separate from Fieldkit source;
+external template directories are configurable and never scanned automatically.
+Lint the Fieldkit source/tests explicitly when a working checkout also contains operator
+lab scripts. A whole-checkout Ruff run additionally checks those unrelated local files.
