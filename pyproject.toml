@@ -20,6 +20,7 @@ dependencies = [
 dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
 browser = ["playwright>=1.48,<2"]
 mcp = ["mcp>=2.3,<3"]
+mssql = ["impacket>=0.12,<1"]
 
 [project.scripts]
 fieldkit = "fieldkit.cli:main"

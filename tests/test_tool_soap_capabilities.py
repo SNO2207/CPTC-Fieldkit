@@ -301,7 +301,7 @@ pathlib.Path.read_text=forbidden
 pathlib.Path.read_bytes=forbidden
 os.system=forbidden
 import fieldkit.registry
-assert len(fieldkit.registry.modules()) == 45
+assert len(fieldkit.registry.modules()) == 49
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr.decode()

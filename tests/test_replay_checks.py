@@ -578,9 +578,13 @@ def test_all_new_modules_share_cli_console_registration(monkeypatch):
         "web/auth-matrix",
         "web/session-workflow",
         "web/browser-login",
+        "web/stored-xss",
+        "integrations/callback-collector",
+        "network/vantage",
+        "database/mssql-export",
     ]
     registry = modules()
-    assert len(registry) == 45 and set(names) <= registry.keys()
+    assert len(registry) == 49 and set(names) <= registry.keys()
     for name in names:
         received = []
         monkeypatch.setattr(

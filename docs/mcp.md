@@ -56,7 +56,16 @@ Tool names map module slashes and hyphens to underscores. For example,
 `web/header-review` is `fieldkit_run_web_header_review`, and `evidence/ingest` is
 `fieldkit_run_evidence_ingest`. Adding a registered module also makes it available
 through MCP without a second hand-maintained list.
-The current registry exposes 45 run tools plus eight utility tools, for 53 tools total.
+The current registry exposes 49 run tools plus eight utility tools, for 57 tools total.
+
+The workflow additions expose `fieldkit_run_web_stored_xss`,
+`fieldkit_run_integrations_callback_collector`, `fieldkit_run_network_vantage`, and
+`fieldkit_run_database_mssql_export`. See the [field workflow guide](field-workflows.md)
+for their dependencies, private inputs, and examples. Callback listener jobs publish
+their generated URLs and receipt file paths in a live report. Stored-content jobs
+publish step outcomes before waiting for delayed callbacks. Exported database rows
+and browser screenshots remain private artifacts; MCP evidence reads return metadata
+for these files.
 
 The new assessment tools are `fieldkit_run_web_parameter_discovery`,
 `fieldkit_run_web_jwt_check`, `fieldkit_run_web_ffuf`, and

@@ -145,6 +145,25 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
     imported.write_text(
         json.dumps({"results": [{"url": "https://fixture.test/preview", "status": 200}]})
     )
+    workflow = tmp_path / "stored-workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "submit",
+                        "request": {
+                            "url": "/support",
+                            "method": "POST",
+                            "form": {"body": "{{payload}}"},
+                        },
+                        "expect": {"statuses": [200]},
+                    }
+                ],
+                "browser": {"url": "/ticket/7"},
+            }
+        )
+    )
 
     async def exercise():
         agent = FieldkitAgent(tmp_path)
@@ -152,12 +171,16 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
             async with Client(mcp_server.build_server(agent)) as client:
                 catalog = await client.list_tools()
                 names = {tool.name for tool in catalog.tools}
-                assert len(names) == 53
+                assert len(names) == len(agent.registry) + 8
                 assert {
                     "fieldkit_run_web_parameter_discovery",
                     "fieldkit_run_web_jwt_check",
                     "fieldkit_run_web_ffuf",
                     "fieldkit_run_integrations_burp_bridge",
+                    "fieldkit_run_web_stored_xss",
+                    "fieldkit_run_integrations_callback_collector",
+                    "fieldkit_run_network_vantage",
+                    "fieldkit_run_database_mssql_export",
                 } <= names
                 cases = [
                     ("fieldkit_run_web_jwt_check", {"TOKEN_FILE": token_file.name}),
@@ -174,6 +197,23 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
                     (
                         "fieldkit_run_web_ffuf",
                         {"INPUT": imported.name, "IMPORT_COMPLETE": True},
+                    ),
+                    (
+                        "fieldkit_run_web_stored_xss",
+                        {
+                            "TARGETS": ["https://fixture.test"],
+                            "WORKFLOW_FILE": workflow.name,
+                            "DRY_RUN": True,
+                        },
+                    ),
+                    ("fieldkit_run_integrations_callback_collector", {"DRY_RUN": True}),
+                    (
+                        "fieldkit_run_network_vantage",
+                        {"TARGETS": ["127.0.0.1"], "DRY_RUN": True},
+                    ),
+                    (
+                        "fieldkit_run_database_mssql_export",
+                        {"HOST": "sql.fixture.test", "DATABASES": ["App"], "DRY_RUN": True},
                     ),
                 ]
                 for tool, options in cases:

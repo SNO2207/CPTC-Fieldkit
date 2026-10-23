@@ -30,7 +30,7 @@ python -m playwright install chromium
 
 If Chromium reports missing system libraries, follow Playwright's platform-specific
 installation output. Metadata-only snapshots work with `--no-screenshot` without the
-browser extra. Other modules run without Chromium. Nuclei execution requires an
+browser extra. Modules that do not render pages run without Chromium. Nuclei execution requires an
 operator-installed Nuclei v3 binary; JSONL import does not. PDF extraction optionally
 uses `pdftotext` from Poppler. Missing Linux commands produce coverage errors rather
 than triggering installation. See [capability setup](docs/capabilities.md).
@@ -39,6 +39,17 @@ The optional `web/ffuf` adapter uses an operator-installed ffuf 2.1 binary for a
 runs; imports work without it. The [Burp capture extension](extensions/burp/README.md)
 builds with a Java 17+ JDK and the Montoya API JAR. Native parameter discovery and JWT
 review run in the Python environment. See the [agent assessment tools guide](docs/agent-assessment-tools.md).
+
+Stored-content browser verification uses the browser extra. Windows-authenticated
+MSSQL inventory and local table exports additionally need the `mssql` extra:
+
+```bash
+python -m pip install -e '.[mssql]'
+```
+
+See the [workflow, callback, vantage, and database guide](docs/field-workflows.md) for setup
+and examples. The MSSQL adapter supports NTLM Windows authentication with a private
+credential file or environment variable; Kerberos authentication is not supported.
 
 In a new terminal, return to the checkout and run `source .venv/bin/activate` again.
 Alternatively, run `.venv/bin/fieldkit` directly. Use `deactivate` when finished.
@@ -156,6 +167,10 @@ network-run report and returns to the console. History is kept in memory only.
 | `evidence/hypotheses` | Preserve supporting evidence, counterevidence, and the next test for a lead. |
 | `evidence/report` | Draft evidence-linked findings with validation status, impact, and remediation notes. |
 | `integrations/burp-bridge` | Receive explicitly selected Burp exchanges into the private vault through an authenticated loopback listener. |
+| `web/stored-xss` | Chain explicit submission, ticket ID extraction, instrumented browser proof, and delayed callback observation. |
+| `integrations/callback-collector` | Collect bounded passive HTTP callbacks and correlate exact markers, methods, body hashes, and timestamps. |
+| `network/vantage` | Compare local routes, DNS, TUN ownership, agent socket observations, and optional selected TCP reachability with reported host vantages. |
+| `database/mssql-export` | Inventory explicit MSSQL databases using Windows NTLM and archive selected tables locally with actual/exported row counts. |
 
 Detailed usage:
 
@@ -339,7 +354,7 @@ python -m ruff format --check src tests
 
 Tests use local HTTP/TLS servers, mocked transports, temporary files, captured outputs,
 and fake executables, never external assessment targets. Browser and real-tool integration
-tests skip when their optional runtimes are unavailable. There are 45 explicitly
+tests skip when their optional runtimes are unavailable. There are 49 explicitly
 registered modules. The downloaded reference toolkit stays separate from Fieldkit source;
 external template directories are configurable and never scanned automatically.
 Lint the Fieldkit source/tests explicitly when a working checkout also contains operator

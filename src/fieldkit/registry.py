@@ -5,6 +5,7 @@ from fieldkit.modules.api_inventory import APIInventory
 from fieldkit.modules.auth_compare import AuthCompare
 from fieldkit.modules.auth_matrix import AuthMatrix
 from fieldkit.modules.burp_bridge import BurpBridge
+from fieldkit.modules.callback_collector import CallbackCollectorModule
 from fieldkit.modules.content_discovery import ContentDiscovery
 from fieldkit.modules.cors_check import CorsCheck
 from fieldkit.modules.evidence_workbench import (
@@ -27,6 +28,8 @@ from fieldkit.modules.injection import SQLiCheck, SSRFCheck, XXECheck
 from fieldkit.modules.js_review import JSReview
 from fieldkit.modules.jwt_check import JWTCheck
 from fieldkit.modules.linux import ExposureAudit, LinuxInventory
+from fieldkit.modules.mssql_export import MSSQLExport
+from fieldkit.modules.network_vantage import NetworkVantage
 from fieldkit.modules.nmap_import import NmapImport
 from fieldkit.modules.nuclei import Nuclei
 from fieldkit.modules.parameter_discovery import ParameterDiscovery
@@ -38,6 +41,7 @@ from fieldkit.modules.session_workflow import BrowserLogin, SessionWorkflow
 from fieldkit.modules.site_map import SiteMap
 from fieldkit.modules.snapshot import Snapshot
 from fieldkit.modules.soap_inventory import SOAPInventory
+from fieldkit.modules.stored_xss import StoredXSS
 from fieldkit.modules.tls_review import TLSReview
 from fieldkit.modules.web_artifacts import WebArtifacts
 from fieldkit.modules.workflow_verify import WorkflowVerifier
@@ -90,5 +94,9 @@ def modules() -> dict[str, Module]:
         ParameterDiscovery(),
         JWTCheck(),
         Ffuf(),
+        StoredXSS(),
+        CallbackCollectorModule(),
+        NetworkVantage(),
+        MSSQLExport(),
     )
     return {module.name: module for module in builtins}

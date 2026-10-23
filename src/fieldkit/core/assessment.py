@@ -490,9 +490,18 @@ class AssessmentContext:
     def finish(self):
         self.report["finished_at"] = utc_now()
         # Modules can identify credentials after their original response was captured.
+        metadata_by_file = {
+            entry.get("file"): entry
+            for entry in self.report["evidence"]
+            if "sha256" in entry or "bytes" in entry
+        }
         for path in (self.store.root / "evidence").glob("*.json"):
             evidence = json.loads(path.read_text(encoding="utf-8"))
-            write_private(path, json.dumps(redact(evidence, self.secrets), indent=2) + "\n")
+            content = (json.dumps(redact(evidence, self.secrets), indent=2) + "\n").encode()
+            write_private(path, content)
+            relative = str(path.relative_to(self.store.root))
+            if entry := metadata_by_file.get(relative):
+                entry.update(bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
         # Inventories intentionally preserve exact URLs locally for chaining; exports redact them.
         inventory = {"schema_version": 2, "endpoints": self.report["endpoints"]}
         write_private(self.store.root / "inventory.json", json.dumps(inventory, indent=2) + "\n")
