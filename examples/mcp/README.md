@@ -43,9 +43,27 @@ An initial agent instruction can be:
 > saved job report, then list the public request records. Do not contact the example
 > hosts; this is a local evidence review.
 
-All modules expose their existing settings under an `options` object using uppercase
-option names, except server-controlled `OUTPUT`. Set the MCP output location in the
+The server advertises `fieldkit_execute_python` and `fieldkit_search_reference`.
+Inside Python, call `fieldkit.run(module, options)` with uppercase option names and
+Python lists/booleans, except server-controlled `OUTPUT`. Search exact module names
+for their typed options, or call `fieldkit.module_info(module)`. Set the MCP output location in the
 server's startup arguments. The same explicit target origins, profile files, limits, and confirmation
 flags apply to network requests. Keep populated profiles and credentials in private
 files rather than adding them to shared MCP configuration. See [the MCP guide](../../docs/mcp.md)
 for tools, job polling, result pagination, and private evidence handling.
+
+For example, pass this `code` to `fieldkit_execute_python`:
+
+```python
+job = fieldkit.run("evidence/ingest", {
+    "INPUT": ["examples/workbench/traffic.har"],
+    "FORMAT": "har",
+    "DATABASE": "artifacts/demo.sqlite",
+}, wait_seconds=5)
+result = {"job_id": job["job_id"], "report": fieldkit.read_report(job["job_id"])}
+```
+
+Existing launch configurations work with code mode. Refresh the client's tool list
+after updating; old `fieldkit_run_*` and utility calls must move into Python. Each
+script has fresh variables; jobs persist. Python runs with the server user's file
+and network permissions, so process separation is not a sandbox.

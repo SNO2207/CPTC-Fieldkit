@@ -4,7 +4,7 @@ These modules share Fieldkit's private run directories, schema-version-2 reports
 CLI/console options, and MCP job interface. The four module names are
 `web/stored-xss`, `integrations/callback-collector`, `network/vantage`, and
 `database/mssql-export`. Use `fieldkit run <module> --help` or MCP
-`fieldkit_module_info` for the complete typed options.
+`fieldkit.module_info(module)` inside `fieldkit_execute_python` for the complete typed options.
 
 ## Stored-content workflow
 

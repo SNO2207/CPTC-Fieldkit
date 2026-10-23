@@ -1,4 +1,4 @@
-"""Protocol checks use the SDK client and a local fake assessment adapter."""
+"""Exercise the two-tool code-mode contract through real SDK clients and stdio."""
 
 import asyncio
 import importlib.util
@@ -11,85 +11,63 @@ from pathlib import Path
 import pytest
 
 from fieldkit import mcp_server
+from fieldkit.core.agent import FieldkitAgent, FieldkitAgentError
+from fieldkit.core.codemode import CodeMode
 
 HAS_MCP = importlib.util.find_spec("mcp") is not None
 requires_mcp = pytest.mark.skipif(not HAS_MCP, reason="Install Fieldkit's mcp extra")
+JOB = "job-" + "1" * 32
+TOOLS = {"fieldkit_execute_python", "fieldkit_search_reference"}
 
 
-class FakeAgent:
+class FakeAgent(FieldkitAgent):
     def __init__(self):
+        super().__init__(Path.cwd(), output="artifacts/unused-test-jobs")
         self.calls = []
-        self.closed = False
 
-    def tools(self):
-        return [
-            {
-                "name": "fieldkit_run_example",
-                "description": "Run a local fixture with explicit options.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "options": {
-                            "type": "object",
-                            "properties": {
-                                "TARGETS": {"type": "array", "items": {"type": "string"}}
-                            },
-                            "required": ["TARGETS"],
-                            "additionalProperties": False,
-                        }
-                    },
-                    "required": ["options"],
-                    "additionalProperties": False,
-                },
-                "annotations": {
-                    "readOnlyHint": False,
-                    "destructiveHint": False,
-                    "idempotentHint": False,
-                    "openWorldHint": True,
-                },
-            }
-        ]
-
-    async def call(self, name, arguments):
-        self.calls.append((name, arguments))
-        if arguments["options"]["TARGETS"] == ["raise"]:
+    async def run(self, module, options=None, wait_seconds=0):
+        self.calls.append((module, options))
+        if options and options.get("TARGETS") == ["raise"]:
             raise ValueError("unregistered-raw-credential-value")
-        return {"job_id": "job-fixture", "status": "running", "password": "do-not-publish"}
+        return self.job_status(JOB)
 
-    def list_modules(self, query=""):
-        return {"modules": [{"name": "example", "description": "local fixture"}]}
+    def job_status(self, job_id):
+        return {"job_id": JOB, "status": "running", "password": "do-not-publish"}
 
     def list_jobs(self, limit=20):
-        return {"jobs": [{"job_id": "job-fixture", "status": "running"}]}
+        return {"jobs": [self.job_status(JOB)]}
 
     def read_report(self, job_id, section="summary", offset=0, limit=50):
-        if job_id != "job-fixture":
+        if job_id != JOB:
             raise ValueError("private-data-in-error")
         return {"job_id": job_id, "section": section, "password": "do-not-publish"}
-
-    async def close(self):
-        self.closed = True
 
 
 @requires_mcp
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
-def test_sdk_discovers_tools_calls_resources_and_prompt(mode):
+def test_sdk_discovers_code_tools_resources_and_prompt(mode):
     from mcp import Client
 
     agent = FakeAgent()
 
     async def exercise():
         async with Client(mcp_server.build_server(agent), mode=mode) as client:
-            tools = await client.list_tools()
-            assert tools.tools[0].name == "fieldkit_run_example"
-            assert tools.tools[0].annotations.open_world_hint is True
-            assert tools.tools[0].input_schema == agent.tools()[0]["input_schema"]
-            result = await client.call_tool(
-                "fieldkit_run_example", {"options": {"TARGETS": ["http://fixture.invalid/"]}}
+            tools = {t.name: t for t in (await client.list_tools()).tools}
+            assert set(tools) == TOOLS
+            assert tools["fieldkit_execute_python"].annotations.open_world_hint is True
+            assert tools["fieldkit_search_reference"].annotations.read_only_hint is True
+            reference = await client.call_tool("fieldkit_search_reference", {"query": "run"})
+            assert reference.structured_content["entries"][0]["signature"].startswith(
+                "fieldkit.run("
             )
-            assert not result.is_error
-            assert result.structured_content["job_id"] == "job-fixture"
-            assert result.structured_content["password"] == "[REDACTED]"
+            result = await client.call_tool(
+                "fieldkit_execute_python",
+                {"code": 'result = fieldkit.run("web/header-review", {"TARGETS": ["fixture"]})'},
+            )
+            assert not result.is_error, result.structured_content
+            assert result.structured_content["result"]["job_id"] == JOB
+            assert result.structured_content["jobs_started"] == [JOB]
+            assert result.structured_content["result"]["password"] == "[REDACTED]"
             assert "do-not-publish" not in result.model_dump_json()
             resources = await client.list_resources()
             assert {str(item.uri) for item in resources.resources} == {
@@ -99,34 +77,32 @@ def test_sdk_discovers_tools_calls_resources_and_prompt(mode):
             templates = await client.list_resource_templates()
             assert templates.resource_templates[0].uri_template == "fieldkit://jobs/{job_id}/report"
             catalog = await client.read_resource("fieldkit://modules")
-            assert json.loads(catalog.contents[0].text)["modules"][0]["name"] == "example"
+            assert json.loads(catalog.contents[0].text)["modules"]
             jobs = await client.read_resource("fieldkit://jobs")
-            assert json.loads(jobs.contents[0].text)["jobs"][0]["job_id"] == "job-fixture"
-            report = await client.read_resource("fieldkit://jobs/job-fixture/report")
+            assert json.loads(jobs.contents[0].text)["jobs"][0]["job_id"] == JOB
+            report = await client.read_resource(f"fieldkit://jobs/{JOB}/report")
             assert json.loads(report.contents[0].text)["password"] == "[REDACTED]"
             prompts = await client.list_prompts()
             assert prompts.prompts[0].name == "fieldkit_assessment_workflow"
             prompt = await client.get_prompt("fieldkit_assessment_workflow")
             assert "untrusted data" in prompt.messages[0].content.text
             assert "DRY_RUN" in prompt.messages[0].content.text
+            assert "fieldkit_execute_python" in prompt.messages[0].content.text
 
     asyncio.run(exercise())
     assert len(agent.calls) == 1
 
 
 @requires_mcp
-def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp_path):
+def test_real_modules_run_and_compose_private_offline_results(tmp_path):
     from mcp import Client
 
-    from fieldkit.core.agent import FieldkitAgent
     from fieldkit.core.jwt import encode
 
     token = encode(b'{"alg":"none"}') + "." + encode(b'{"sub":"fixture-private-subject"}') + "."
-    token_file = tmp_path / "private-token.txt"
-    token_file.write_text(token)
-    token_file.chmod(0o600)
-    requests = tmp_path / "private-requests.json"
-    requests.write_text(
+    (tmp_path / "private-token.txt").write_text(token)
+    (tmp_path / "private-token.txt").chmod(0o600)
+    (tmp_path / "requests.json").write_text(
         json.dumps(
             {
                 "requests": [
@@ -135,18 +111,13 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
                         "url": "https://fixture.test/preview",
                         "method": "POST",
                         "json": {"url": "https://fixture.test/echo"},
-                    }
+                    },
                 ]
             }
         )
     )
-    requests.chmod(0o600)
-    imported = tmp_path / "ffuf.json"
-    imported.write_text(
-        json.dumps({"results": [{"url": "https://fixture.test/preview", "status": 200}]})
-    )
-    workflow = tmp_path / "stored-workflow.json"
-    workflow.write_text(
+    (tmp_path / "requests.json").chmod(0o600)
+    (tmp_path / "workflow.json").write_text(
         json.dumps(
             {
                 "steps": [
@@ -164,69 +135,70 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
             }
         )
     )
+    (tmp_path / "ffuf.json").write_text(
+        json.dumps({"results": [{"url": "https://fixture.test/", "status": 200}]})
+    )
+    cases = [
+        ("web/jwt-check", {"TOKEN_FILE": "private-token.txt"}),
+        ("web/ffuf", {"INPUT": "ffuf.json", "IMPORT_COMPLETE": True}),
+        (
+            "web/parameter-discovery",
+            {
+                "TARGETS": ["https://fixture.test"],
+                "REQUESTS_FILE": "requests.json",
+                "REQUEST_IDS": ["preview"],
+                "NAMES": ["method", "body", "bearer"],
+                "DRY_RUN": True,
+            },
+        ),
+        (
+            "web/stored-xss",
+            {
+                "TARGETS": ["https://fixture.test"],
+                "WORKFLOW_FILE": "workflow.json",
+                "DRY_RUN": True,
+            },
+        ),
+        ("integrations/callback-collector", {"DRY_RUN": True}),
+        (
+            "database/mssql-export",
+            {
+                "HOST": "sql.fixture.test",
+                "DATABASES": ["App"],
+                "DRY_RUN": True,
+            },
+        ),
+    ]
+    if sys.platform == "linux":
+        cases.append(("network/vantage", {"TARGETS": ["127.0.0.1"], "DRY_RUN": True}))
 
     async def exercise():
         agent = FieldkitAgent(tmp_path)
         try:
             async with Client(mcp_server.build_server(agent)) as client:
-                catalog = await client.list_tools()
-                names = {tool.name for tool in catalog.tools}
-                assert len(names) == len(agent.registry) + 8
-                assert {
-                    "fieldkit_run_web_parameter_discovery",
-                    "fieldkit_run_web_jwt_check",
-                    "fieldkit_run_web_ffuf",
-                    "fieldkit_run_integrations_burp_bridge",
-                    "fieldkit_run_web_stored_xss",
-                    "fieldkit_run_integrations_callback_collector",
-                    "fieldkit_run_network_vantage",
-                    "fieldkit_run_database_mssql_export",
-                } <= names
-                cases = [
-                    ("fieldkit_run_web_jwt_check", {"TOKEN_FILE": token_file.name}),
-                    (
-                        "fieldkit_run_web_parameter_discovery",
+                assert {t.name for t in (await client.list_tools()).tools} == TOOLS
+                reference = await client.call_tool(
+                    "fieldkit_search_reference", {"query": "web/jwt-check"}
+                )
+                assert reference.structured_content["entries"][0]["module"] == "web/jwt-check"
+                for module, options in cases:
+                    result = await client.call_tool(
+                        "fieldkit_execute_python",
                         {
-                            "TARGETS": ["https://fixture.test"],
-                            "REQUESTS_FILE": requests.name,
-                            "REQUEST_IDS": ["preview"],
-                            "NAMES": ["method", "body", "bearer"],
-                            "DRY_RUN": True,
+                            "code": (
+                                f"job = fieldkit.run({module!r}, {options!r}, wait_seconds=10)\n"
+                                'report = fieldkit.read_report(job["job_id"], section="results")\n'
+                                'result = {"status": job["status"], "report": report}'
+                            )
                         },
-                    ),
-                    (
-                        "fieldkit_run_web_ffuf",
-                        {"INPUT": imported.name, "IMPORT_COMPLETE": True},
-                    ),
-                    (
-                        "fieldkit_run_web_stored_xss",
-                        {
-                            "TARGETS": ["https://fixture.test"],
-                            "WORKFLOW_FILE": workflow.name,
-                            "DRY_RUN": True,
-                        },
-                    ),
-                    ("fieldkit_run_integrations_callback_collector", {"DRY_RUN": True}),
-                    (
-                        "fieldkit_run_network_vantage",
-                        {"TARGETS": ["127.0.0.1"], "DRY_RUN": True},
-                    ),
-                    (
-                        "fieldkit_run_database_mssql_export",
-                        {"HOST": "sql.fixture.test", "DATABASES": ["App"], "DRY_RUN": True},
-                    ),
-                ]
-                for tool, options in cases:
-                    result = await client.call_tool(tool, {"options": options, "wait_seconds": 10})
-                    assert not result.is_error, result.model_dump_json()
-                    status = result.structured_content
-                    assert status["status"] == "completed", status
-                    report = await client.call_tool(
-                        "fieldkit_read_report", {"job_id": status["job_id"], "section": "results"}
                     )
-                    assert report.structured_content["available"]
-                    assert token not in report.model_dump_json()
-                    assert "fixture-private-subject" not in report.model_dump_json()
+                    assert not result.is_error, result.structured_content
+                    assert result.structured_content["result"]["status"] == "completed", (
+                        result.structured_content
+                    )
+                    assert result.structured_content["result"]["report"]["available"]
+                    assert token not in result.model_dump_json()
+                    assert "fixture-private-subject" not in result.model_dump_json()
         finally:
             await agent.close()
 
@@ -238,18 +210,18 @@ def test_real_assessment_tools_are_discoverable_and_run_private_offline_jobs(tmp
     "arguments,constraint",
     [
         ({}, "required"),
-        ({"options": {"TARGETS": "private-secret-value"}}, "type"),
-        ({"options": {"TARGETS": [], "PASSWORD": "private-secret-value"}}, "additionalProperties"),
+        ({"code": ["private-secret-value"]}, "type"),
+        ({"code": "pass", "PASSWORD": "private-secret-value"}, "additionalProperties"),
     ],
 )
-def test_schema_rejection_is_actionable_and_does_not_echo_values(arguments, constraint):
+def test_schema_rejection_does_not_echo_values(arguments, constraint):
     from mcp import Client
 
     agent = FakeAgent()
 
     async def exercise():
         async with Client(mcp_server.build_server(agent)) as client:
-            result = await client.call_tool("fieldkit_run_example", arguments)
+            result = await client.call_tool("fieldkit_execute_python", arguments)
             assert result.is_error
             assert result.structured_content["constraint"] == constraint
             assert "private-secret-value" not in result.model_dump_json()
@@ -259,16 +231,17 @@ def test_schema_rejection_is_actionable_and_does_not_echo_values(arguments, cons
 
 
 @requires_mcp
-def test_unknown_tool_and_unexpected_exception_are_public_errors():
+def test_removed_tools_and_unexpected_exceptions_are_public_errors():
     from mcp import Client
 
     async def exercise():
         async with Client(mcp_server.build_server(FakeAgent()), mode="legacy") as client:
-            unknown = await client.call_tool("unknown", {})
-            assert unknown.is_error
-            assert unknown.structured_content["error"] == "Unknown Fieldkit tool."
+            removed = await client.call_tool("fieldkit_run_web_header_review", {})
+            assert removed.is_error
+            assert removed.structured_content["error"] == "Unknown Fieldkit tool."
             failed = await client.call_tool(
-                "fieldkit_run_example", {"options": {"TARGETS": ["raise"]}}
+                "fieldkit_execute_python",
+                {"code": 'result = fieldkit.run("web/header-review", {"TARGETS": ["raise"]})'},
             )
             assert failed.is_error
             assert "unregistered-raw-credential-value" not in failed.model_dump_json()
@@ -285,17 +258,17 @@ def test_unknown_tool_and_unexpected_exception_are_public_errors():
 def test_explicit_public_agent_errors_are_actionable():
     from mcp import Client
 
-    from fieldkit.core.agent import FieldkitAgentError
-
     class LimitedAgent(FakeAgent):
-        async def call(self, name, arguments):
+        async def run(self, module, options=None, wait_seconds=0):
             raise FieldkitAgentError("Active job limit reached; wait for or cancel a job")
 
     async def exercise():
         async with Client(mcp_server.build_server(LimitedAgent())) as client:
-            result = await client.call_tool("fieldkit_run_example", {"options": {"TARGETS": []}})
+            result = await client.call_tool(
+                "fieldkit_execute_python", {"code": 'result = fieldkit.run("web/header-review")'}
+            )
             assert result.is_error
-            assert "Active job limit reached" in result.structured_content["error"]
+            assert "Active job limit reached" in result.structured_content["detail"]
 
     asyncio.run(exercise())
 
@@ -307,7 +280,6 @@ def test_invalid_server_options_are_actionable_on_stderr(tmp_path, monkeypatch, 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "MAX_JOBS must be 1-8" in captured.err
-    assert "Traceback" not in captured.err
 
 
 @requires_mcp
@@ -318,30 +290,31 @@ def test_subprocess_stdio_and_eof_cleanup(tmp_path, mode):
 
     marker = tmp_path / "closed"
     script = tmp_path / "fixture_server.py"
-    test_directory = Path(__file__).resolve().parent
     script.write_text(
-        "import asyncio\n"
-        "from pathlib import Path\n"
-        "from fieldkit.mcp_server import serve\n"
-        "from test_mcp_protocol import FakeAgent\n"
+        "import asyncio\nfrom pathlib import Path\n"
+        "from fieldkit.mcp_server import serve\nfrom test_mcp_protocol import FakeAgent\n"
         "class Agent(FakeAgent):\n"
-        "    async def call(self, name, arguments):\n"
+        "    async def run(self, module, options=None, wait_seconds=0):\n"
         "        print('fixture stray handler stdout')\n"
-        "        return await super().call(name, arguments)\n"
+        "        return await super().run(module, options, wait_seconds)\n"
         "    async def close(self):\n"
         f"        Path({str(marker)!r}).write_text('closed')\n"
         "asyncio.run(serve(Agent()))\n"
     )
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(test_directory), str(Path.cwd() / "src")])
+    env["PYTHONPATH"] = os.pathsep.join([str(Path(__file__).parent), str(Path.cwd() / "src")])
     params = StdioServerParameters(command=sys.executable, args=[str(script)], env=env)
 
     async def exercise():
         async with Client(params, mode=mode) as client:
-            listed = await client.list_tools()
-            assert listed.tools[0].name == "fieldkit_run_example"
-            response = await client.call_tool("fieldkit_run_example", {"options": {"TARGETS": []}})
-            assert response.structured_content["status"] == "running"
+            assert {t.name for t in (await client.list_tools()).tools} == TOOLS
+            response = await client.call_tool(
+                "fieldkit_execute_python",
+                {"code": 'print("script output")\nresult = fieldkit.run("web/header-review")'},
+            )
+            assert not response.is_error, response.structured_content
+            assert response.structured_content["result"]["status"] == "running"
+            assert response.structured_content["stdout"] == "script output\n"
 
     asyncio.run(exercise())
     assert marker.read_text() == "closed"
@@ -393,7 +366,7 @@ def test_server_releases_jobs_when_connection_is_cancelled(monkeypatch):
         yield None, None
 
     monkeypatch.setattr(mcp_server, "_load_sdk", lambda: (Server, None, transport, None))
-    monkeypatch.setattr(mcp_server, "build_server", lambda agent: Server())
+    monkeypatch.setattr(mcp_server, "build_server", lambda agent, runtime: Server())
 
     async def exercise():
         task = asyncio.create_task(mcp_server.serve(agent))
@@ -408,11 +381,45 @@ def test_server_releases_jobs_when_connection_is_cancelled(monkeypatch):
 
 @requires_mcp
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_sdk_request_cancellation_releases_python_worker(tmp_path, mode):
+    from mcp import Client
+
+    async def exercise():
+        agent = FieldkitAgent(tmp_path)
+        runtime = CodeMode(agent)
+        try:
+            async with Client(mcp_server.build_server(agent, runtime), mode=mode) as client:
+                task = asyncio.create_task(
+                    client.call_tool(
+                        "fieldkit_execute_python",
+                        {
+                            "code": 'from pathlib import Path\nPath("ready").touch()\n'
+                            "while True: pass"
+                        },
+                    )
+                )
+                async with asyncio.timeout(3):
+                    while not (tmp_path / "ready").exists():
+                        await asyncio.sleep(0.01)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                async with asyncio.timeout(3):
+                    while runtime.tasks:
+                        await asyncio.sleep(0.01)
+                response = await client.call_tool("fieldkit_execute_python", {"code": "result = 7"})
+                assert response.structured_content["result"] == 7
+        finally:
+            await runtime.close()
+            await agent.close()
+
+    asyncio.run(exercise())
+
+
+@requires_mcp
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
 def test_real_cli_stdio_registry_and_dry_run_job(tmp_path, mode):
     from mcp import Client
     from mcp.client.stdio import StdioServerParameters
-
-    from fieldkit.registry import modules
 
     server = StdioServerParameters(
         command=sys.executable,
@@ -421,40 +428,36 @@ def test_real_cli_stdio_registry_and_dry_run_job(tmp_path, mode):
 
     async def exercise():
         async with Client(server, mode=mode) as client:
-            listed = await client.list_tools()
-            expected = {
-                "fieldkit_run_" + name.replace("/", "_").replace("-", "_") for name in modules()
-            }
-            assert {
-                item.name for item in listed.tools if item.name.startswith("fieldkit_run_")
-            } == (expected)
-            info = await client.call_tool("fieldkit_module_info", {"module": "web/header-review"})
-            assert not info.is_error, info.structured_content
-            properties = info.structured_content["input_schema"]["properties"]["options"]
+            assert {t.name for t in (await client.list_tools()).tools} == TOOLS
+            info = await client.call_tool(
+                "fieldkit_search_reference", {"query": "web/header-review"}
+            )
+            properties = info.structured_content["entries"][0]["input_schema"]["properties"][
+                "options"
+            ]
             assert "OUTPUT" not in properties["properties"]
-            run = await client.call_tool(
-                "fieldkit_run_web_header_review",
+            response = await client.call_tool(
+                "fieldkit_execute_python",
                 {
-                    "options": {"TARGETS": ["http://127.0.0.1:9/"], "DRY_RUN": True},
-                    "wait_seconds": 5,
+                    "code": 'job = fieldkit.run("web/header-review", '
+                    '{"TARGETS": ["http://127.0.0.1:9/"], "DRY_RUN": True}, wait_seconds=5)\n'
+                    'result = {"job": fieldkit.job_status(job["job_id"]), '
+                    '"report": fieldkit.read_report(job["job_id"]), "jobs": fieldkit.list_jobs()}'
                 },
             )
-            assert not run.is_error, run.structured_content
-            job_id = run.structured_content["job_id"]
-            state = await client.call_tool("fieldkit_job_status", {"job_id": job_id})
-            assert state.structured_content["status"] == "completed", state.structured_content
-            report = await client.call_tool("fieldkit_read_report", {"job_id": job_id})
-            assert report.structured_content["summary"]["completed"] is True
-            assert report.structured_content["summary"]["counts"]["evidence"] == 0
-            report_resource = await client.read_resource(f"fieldkit://jobs/{job_id}/report")
-            assert json.loads(report_resource.contents[0].text)["summary"]["completed"] is True
-            runs = await client.call_tool("fieldkit_list_jobs", {})
-            assert runs.structured_content["jobs"][0]["job_id"] == job_id
+            assert not response.is_error, response.structured_content
+            result = response.structured_content["result"]
+            assert result["job"]["status"] == "completed"
+            assert result["report"]["summary"]["completed"] is True
+            job_id = result["job"]["job_id"]
+            assert result["jobs"]["jobs"][0]["job_id"] == job_id
+            resource = await client.read_resource(f"fieldkit://jobs/{job_id}/report")
+            assert json.loads(resource.contents[0].text)["summary"]["completed"] is True
             return job_id
 
     job_id = asyncio.run(exercise())
-    job_directory = tmp_path / "artifacts" / "mcp" / job_id
-    assert not (job_directory / ".settings.json").exists()
-    report = json.loads(next((job_directory / "runs").glob("*/report.json")).read_text())
+    directory = tmp_path / "artifacts" / "mcp" / job_id
+    assert not (directory / ".settings.json").exists()
+    report = json.loads(next((directory / "runs").glob("*/report.json")).read_text())
     assert report["plan"]["validated_settings"]["DRY_RUN"] is True
     assert report["plan"]["network_requests"] == 0

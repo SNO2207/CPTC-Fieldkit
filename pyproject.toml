@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
 browser = ["playwright>=1.48,<2"]
-mcp = ["mcp>=2.3,<3"]
+mcp = ["mcp>=2.3,<3", "anyio>=4.5,<5"]
 mssql = ["impacket>=0.12,<1"]
 
 [project.scripts]

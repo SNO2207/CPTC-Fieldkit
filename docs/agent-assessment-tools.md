@@ -1,21 +1,21 @@
 # Parameter discovery, JWT checks, Burp captures, and ffuf
 
-These four modules use the same CLI, console, reports, and typed MCP run tools as the
+These four modules use the same CLI, console, reports, and MCP Python API as the
 rest of Fieldkit. Captured traffic supplies request context; explicit target origins
 and module confirmation flags authorize active work. Examples use a fictional fixture
 at `https://app.example.test`. Replace its origin and private inputs with your selected
 assessment request before an active run.
 
-| Module | MCP run tool | Operation |
+| Module | Python execution | Operation |
 | --- | --- | --- |
-| `web/parameter-discovery` | `fieldkit_run_web_parameter_discovery` | Native unknown-field discovery on selected requests. |
-| `web/jwt-check` | `fieldkit_run_web_jwt_check` | Offline token review or explicitly selected HTTP validation tests. |
-| `integrations/burp-bridge` | `fieldkit_run_integrations_burp_bridge` | Selected capture handoff into a private local vault. |
-| `web/ffuf` | `fieldkit_run_web_ffuf` | Offline JSON/JSONL import or a bounded active single-field campaign. |
+| `web/parameter-discovery` | `fieldkit.run("web/parameter-discovery", options)` | Native unknown-field discovery on selected requests. |
+| `web/jwt-check` | `fieldkit.run("web/jwt-check", options)` | Offline token review or explicitly selected HTTP validation tests. |
+| `integrations/burp-bridge` | `fieldkit.run("integrations/burp-bridge", options)` | Selected capture handoff into a private local vault. |
+| `web/ffuf` | `fieldkit.run("web/ffuf", options)` | Offline JSON/JSONL import or a bounded active single-field campaign. |
 
-Use `fieldkit run MODULE --help` or MCP `fieldkit_module_info` for current defaults.
-MCP options use uppercase keys, JSON arrays for lists, and JSON booleans. The registry
-contains 45 modules; those run tools plus eight utility tools give 53 MCP tools.
+Use `fieldkit run MODULE --help` or `fieldkit.module_info(module)` inside `fieldkit_execute_python` for current defaults.
+Python options use uppercase keys, lists, and booleans. MCP exposes two stable tools:
+`fieldkit_execute_python` and `fieldkit_search_reference`, regardless of module count.
 See [MCP setup](mcp.md) for client configuration, jobs, and evidence reads.
 
 ## Private fixture inputs
@@ -245,27 +245,24 @@ fieldkit run web/request-replay https://app.example.test \
   --database artifacts/assessment.sqlite --request-id REQUEST_ID_FROM_CAPTURE --dry-run
 ```
 
-An MCP client can start the receiver with `fieldkit_run_integrations_burp_bridge`:
+An MCP client can start the receiver with `fieldkit_execute_python`:
 
-```json
-{
-  "options": {
+```python
+result = fieldkit.run("integrations/burp-bridge", {
     "ORIGINS": ["https://app.example.test"],
     "DATABASE": "artifacts/assessment.sqlite",
     "BUDGET": 600,
-    "MAX_CAPTURES": 100
-  },
-  "wait_seconds": 0
-}
+    "MAX_CAPTURES": 100,
+})
 ```
 
-Use `fieldkit_read_report` with the returned `job_id` and `section: "results"` to
-find the ready configuration path and received request IDs while the receiver runs.
-The human selects the configuration in Burp. `fieldkit_vault_records` with
-`{"database":"artifacts/assessment.sqlite","kind":"request"}` exposes public,
-redacted capture metadata. Pass a chosen ID to replay, parameter discovery, JWT
-checks, or ffuf along with their explicit target origins and confirmation controls.
-MCP reads do not expose the receiver token or private raw request bodies.
+Use `fieldkit.read_report(job_id, section="results")` in a later script to find the
+ready configuration path and received request IDs while the receiver runs. The human
+selects the configuration in Burp. `fieldkit.vault_records("artifacts/assessment.sqlite",
+kind="request")` exposes public redacted capture metadata. Pass a chosen ID to replay,
+parameter discovery, JWT checks, or ffuf with explicit target origins and confirmation
+controls. These facade reads do not expose the receiver token or private raw request
+bodies; arbitrary Python retains the server user's local permissions.
 
 Defaults are a dynamically allocated port, 100 total exchanges, 10 per send, 512 KiB
 per decoded request/response body, a 1 MiB capture payload, and a 120-second listening

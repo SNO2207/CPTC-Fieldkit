@@ -1,9 +1,11 @@
-# MCP tools for AI agents
+# MCP code mode for AI agents
 
-Fieldkit's optional MCP server makes the existing registry available to Copilot and
-other local MCP clients. Every registered module has a typed run tool. Additional
-tools let an agent inspect options, manage background jobs, read redacted reports
-and evidence, and inspect public SQLite records. The CLI and console remain available.
+Fieldkit exposes two MCP tools: Python execution and searchable local references.
+Agents compose module runs, job management, report reads, and filtering in Python,
+then return only the selected data. The tool list stays the same as modules are added.
+This follows the code-mode pattern described in the
+[Hex-Rays IDA MCP announcement](https://hex-rays.com/blog/hex-rays-ida-mcp-server).
+Fieldkit does not require IDA or an IDA MCP installation.
 
 ## Install and connect
 
@@ -15,17 +17,12 @@ python3 -m venv .venv
 .venv/bin/fieldkit mcp --help
 ```
 
-The `mcp` extra installs the supported Python MCP SDK (`mcp>=2.3,<3`). The server
-requires this major-version-2 interface; installing a version-1 SDK separately does
-not provide the server's supported API. Other Fieldkit interfaces do not require
-this optional dependency.
+The optional extra installs the supported Python MCP SDK (`mcp>=2.3,<3`). Ordinary
+CLI and console use do not import the SDK. Browser modules additionally need
+`.[browser]` and Chromium; external tools and MSSQL retain their existing dependencies.
 
-Browser modules additionally need `.[browser]` and installed Chromium; Nuclei
-execution still needs an operator-installed Nuclei binary. MCP installation does
-not install these optional runtimes.
-
-Copy and edit the appropriate [client example](../examples/mcp/README.md). The client
-launches this command and communicates over its standard input and output:
+Use the [client configuration examples](../examples/mcp/README.md). The client
+launches a local stdio server:
 
 ```bash
 /absolute/path/to/CPTC-Fieldkit/.venv/bin/fieldkit mcp \
@@ -36,232 +33,189 @@ launches this command and communicates over its standard input and output:
   --max-output 1048576
 ```
 
-`fieldkit-mcp` is an equivalent server entry point with the same server flags.
-Use an absolute executable and workspace path so the agent client's working directory
-does not change which files are used. Relative module paths are interpreted in the
-configured workspace. The MCP connection uses local stdio. An explicitly started
-Burp bridge or active ffuf job creates its own temporary loopback listener.
-Standard output belongs to the MCP protocol; module output is captured by workers.
-This separation follows the [MCP stdio guidance](https://modelcontextprotocol.io/docs/develop/build-server#logging-in-mcp-servers).
+`fieldkit-mcp` accepts the same flags. Absolute executable and workspace paths avoid
+dependence on the client's working directory. Module input paths and Python's
+working directory use `--workspace`. Protocol stdout stays separate from Python's
+captured `print()` output and module worker logs.
 
-For VS Code, the example `servers` configuration belongs in `.vscode/mcp.json`.
-The portable `mcpServers` example belongs in a workspace `.mcp.json` or a compatible
-client's configuration. Start the server and enable its tools through the client's
-MCP controls. Configuration locations, server trust, tool selection, and log access
-are documented in [VS Code's MCP guide](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+## Two tools
 
-## Discover and run tools
+| Tool | Inputs | Behavior |
+| --- | --- | --- |
+| `fieldkit_search_reference` | `query`, optional `limit` (1–10, default 5) | Search API signatures, examples, and registered module descriptions. An exact module name includes its option schema. |
+| `fieldkit_execute_python` | `code`, optional `timeout_seconds` (1–120, default 30) | Execute Python with the synchronous `fieldkit` object. Set `result` to a JSON value and/or print concise output. |
 
-Tool names map module slashes and hyphens to underscores. For example,
-`web/header-review` is `fieldkit_run_web_header_review`, and `evidence/ingest` is
-`fieldkit_run_evidence_ingest`. Adding a registered module also makes it available
-through MCP without a second hand-maintained list.
-The current registry exposes 49 run tools plus eight utility tools, for 57 tools total.
+Start with references for `run` or `read_report`, or a module keyword such as `jwt`.
+For exact module options search `web/header-review`, or execute:
 
-The workflow additions expose `fieldkit_run_web_stored_xss`,
-`fieldkit_run_integrations_callback_collector`, `fieldkit_run_network_vantage`, and
-`fieldkit_run_database_mssql_export`. See the [field workflow guide](field-workflows.md)
-for their dependencies, private inputs, and examples. Callback listener jobs publish
-their generated URLs and receipt file paths in a live report. Stored-content jobs
-publish step outcomes before waiting for delayed callbacks. Exported database rows
-and browser screenshots remain private artifacts; MCP evidence reads return metadata
-for these files.
+```python
+result = fieldkit.module_info("web/header-review")
+```
 
-The new assessment tools are `fieldkit_run_web_parameter_discovery`,
-`fieldkit_run_web_jwt_check`, `fieldkit_run_web_ffuf`, and
-`fieldkit_run_integrations_burp_bridge`. They use the same saved request IDs,
-private file inputs, and explicit active-test flags as their CLI counterparts.
-The [assessment tools guide](agent-assessment-tools.md) covers their workflows.
-The Burp bridge job publishes its private configuration path and captured request
-IDs through its live report; the receiver token stays in the local owner-only file.
-An agent can select those IDs for a later scoped module run.
+Reference search is local and read-only. Module information is derived from the same
+registry and option definitions as the CLI and console. New modules appear without
+adding MCP tool schemas.
 
-| Tool | Purpose |
+## Python API
+
+Every method on `fieldkit` is synchronous inside a script. The broker handles
+asynchronous job operations in the server; scripts do not need `await`.
+
+| Method | Purpose |
 | --- | --- |
-| `fieldkit_list_modules` | Find modules, optionally using `query`. |
-| `fieldkit_module_info` | Read one module's options, defaults, types, and description using `module`. |
-| `fieldkit_run_<module>` | Start the named module with typed `options` and optional `wait_seconds`. |
-| `fieldkit_job_status` | Read progress and saved output locations using `job_id`. |
-| `fieldkit_list_jobs` | List saved jobs with a bounded `limit`. |
-| `fieldkit_cancel_job` | Cancel a running job using `job_id`. |
-| `fieldkit_read_report` | Page through a job's redacted report sections. |
-| `fieldkit_read_evidence` | Read a report-referenced, redacted evidence item. |
-| `fieldkit_vault_records` | Page through public vault records using `database` and optional `kind`. |
+| `list_modules(query="")` | Find modules by name or description. |
+| `module_info(module)` | Read options, defaults, JSON types, and input schema. |
+| `run(module, options=None, wait_seconds=0)` | Start a module job; optionally wait 0–20 seconds for its status. |
+| `list_jobs(limit=20)` | List persistent jobs, including abandoned runs; limit 1–100. |
+| `job_status(job_id)` | Read progress, report availability, and worker outcome. |
+| `cancel_job(job_id)` | Cancel a job while retaining partial evidence. |
+| `read_report(job_id, section="summary", offset=0, limit=50)` | Read summary or paginated `results`, `findings`, `errors`, `endpoints`, `evidence`. |
+| `read_evidence(job_id, evidence_id)` | Read a report-referenced public evidence item. |
+| `vault_records(database="artifacts/fieldkit.sqlite", kind="", offset=0, limit=50)` | Page public records from an existing vault in the workspace. |
 
-Clients that support MCP resources can read `fieldkit://modules`, `fieldkit://jobs`,
-and the report-summary template `fieldkit://jobs/{job_id}/report`. Clients that support
-MCP prompts can use `fieldkit_assessment_workflow` for a discovery, scope, execution,
-and evidence-review workflow. These capabilities use the same public data boundaries
-as the tools.
+Options use uppercase names, Python lists for list values, and Python booleans.
+Omitted settings use module defaults. Unknown settings and incorrect types fail
+before a job is launched. `OUTPUT` is server-controlled: set `--output` at startup.
+Option strings are limited to 8,192 characters, lists to 1,000 strings, and the
+complete private settings document to 128 KiB. Target origins, private profiles,
+active-test confirmations, pacing, and module budgets retain their CLI semantics.
 
-Run tools accept the module's uppercase option names under `options`. Lists are JSON
-arrays, booleans are JSON booleans, and numeric options are numbers. Omitted settings
-use the module's existing defaults. Unknown option names and incorrect types fail
-validation. Use `fieldkit_module_info` before assembling a request rather than
-translating CLI flag names by guesswork.
+Each script runs in a fresh Python process and namespace. Imports, functions,
+comprehensions, loops, and standard Python libraries work normally. Variables do
+not persist between calls; job IDs and saved artifacts do. Store an ID in the agent's
+context and use it in a later script. No last-expression evaluation is performed:
+assign `result` or use `print()`.
 
-`OUTPUT` is server-controlled and cannot be supplied in `options`; configure the
-server's `--output` flag instead. Module information marks this option as
-`server_controlled`, and run schemas omit it. List settings accept at most 1,000
-strings, individual strings are limited to 8,192 characters, and the complete private
-settings document is limited to 128 KiB.
+## Compose an offline ingest and report read
 
-For example, import the sanitized local HAR without making network requests:
+Submit the following as `code` to `fieldkit_execute_python`. It imports the sanitized
+local HAR without contacting its example hosts, waits briefly, and returns a compact
+summary rather than all intermediate data:
 
-```json
-{
-  "options": {
+```python
+job = fieldkit.run("evidence/ingest", {
     "INPUT": ["examples/workbench/traffic.har"],
     "FORMAT": "har",
     "DATABASE": "artifacts/demo.sqlite",
     "USER": "example-employee",
     "ROLE": "employee",
-    "TAGS": ["shipment"]
-  },
-  "wait_seconds": 0
+    "TAGS": ["shipment"],
+}, wait_seconds=5)
+report = fieldkit.read_report(job["job_id"])
+result = {"job_id": job["job_id"], "status": job["status"], "report": report}
+```
+
+If the job is still running, poll in a later execution:
+
+```python
+result = fieldkit.job_status("JOB_ID_FROM_RUN")
+```
+
+Read a bounded page of public request metadata and return selected fields:
+
+```python
+page = fieldkit.vault_records("artifacts/demo.sqlite", kind="request", limit=20)
+result = {
+    "requests": [{"id": row["id"], "data": row["data"]} for row in page["items"]],
+    "next_offset": page["next_offset"],
 }
 ```
 
-Call `fieldkit_run_evidence_ingest` with that object. Keep the returned `job_id`, poll
-`fieldkit_job_status`, then read results:
+Reports and vault pages include `next_offset`; pass it to the next read. Limits are
+1–100 entries per page. Bounded reads may return fewer entries than requested.
+Treat `available: false` as an unfinished/unavailable report, and inspect job status
+before assuming that no findings exist. Oversized entries are marked as omitted.
 
-```json
-{
-  "job_id": "JOB_ID_FROM_RUN",
-  "section": "results",
-  "offset": 0,
-  "limit": 50
-}
+To compose multiple explicitly selected dry runs and return only status:
+
+```python
+result = []
+for module in ["web/header-review", "web/cors-check"]:
+    job = fieldkit.run(module, {
+        "TARGETS": ["https://app.example.test"],
+        "DRY_RUN": True,
+    }, wait_seconds=5)
+    result.append({"module": module, "job_id": job["job_id"], "status": job["status"]})
 ```
 
-That object is for `fieldkit_read_report`. Its sections are `summary`, `results`,
-`findings`, `errors`, `endpoints`, and `evidence`. Use `offset` and `limit` to retrieve
-subsequent pages instead of requesting all evidence at once. Inspect `completed` and
-errors before treating the run as complete. Pagination defaults to 50 items and permits
-1–100 items; follow the returned `next_offset`, which also accounts for response byte
-limits. The adapter limits JSON reads to 8 MiB and paginated responses to approximately
-64 KiB. Oversized individual entries return an `entry_omitted` marker. A single evidence
-read returns metadata when its redacted content exceeds the response limit.
-For `results/compare`, paginated section entries contain `change` (`added`,
-`removed`, or `changed`) and the corresponding `record`. The original comparison
-report keeps its existing grouped JSON format.
+Long-running callback collectors and Burp receivers continue as background jobs.
+Use `read_report(job_id, section="results")` for live readiness metadata, callback
+URLs, configuration paths, and selected request IDs. See the
+[field workflow guide](field-workflows.md) and
+[assessment modules guide](agent-assessment-tools.md) for dependencies and private inputs.
 
-`fieldkit_vault_records` can then list
-public imported requests:
+## Results, deadlines, and shutdown
 
-```json
-{
-  "database": "artifacts/demo.sqlite",
-  "kind": "request",
-  "offset": 0,
-  "limit": 50
-}
-```
+An execution returns `result` (JSON value, default null), `stdout`, `stderr`,
+`api_calls`, and `jobs_started`. Failed executions include `error` and, where
+available, an exception type, source line number, and a public API diagnostic.
+Arbitrary exception messages and tracebacks are not returned. MCP marks a failed
+execution as a tool error. API exceptions can also be caught in Python.
 
-The request IDs can be passed to `web/request-replay` along with its explicit target
-origins, private database path, and any applicable profile settings. A captured URL
-is evidence, and importing it does not authorize a network request.
+Code is limited to 32 KiB of UTF-8, captured stdout/stderr share a 16 KiB budget,
+and the complete returned response is bounded to 64 KiB. Scripts may make up to
+1,000 broker API calls. Non-JSON values, nonfinite numbers, and oversized outputs
+produce an error; select fewer fields or smaller pages. An execution limit does not
+undo work already performed.
 
-For a scoped header review, after supplying your actual authorized target:
+Python scripts have their own hard deadline, separate from assessment job deadlines.
+A timeout or script error leaves started jobs available, including a job whose
+`wait_seconds` wait was interrupted. `jobs_started` lists their IDs even when a
+script fails. Inspect these IDs or `fieldkit.list_jobs()` before retrying a run with
+side effects. Explicit `cancel_job` stops an assessment job. Script cancellation
+and deadlines terminate the Python process group, including ordinary descendants.
 
-```json
-{
-  "options": {
-    "TARGETS": ["https://app.example.test"],
-    "PATHS": ["/account"],
-    "RATE": 2,
-    "BUDGET": 60
-  },
-  "wait_seconds": 0
-}
-```
-
-Call `fieldkit_run_web_header_review` with that object. The example hostname is a
-placeholder. Read the module description and exact options to choose passive imports,
-network checks, or explicit mutations. All module-run tools advertise potential side
-effects to clients; existing confirmation flags remain required for the modules that
-use them.
-
-## Jobs and bounds
-
-Run calls start worker jobs. `wait_seconds` can wait briefly, from zero to twenty
-seconds; longer work is inspected through status/report tools. The server's
-`--max-jobs` setting limits simultaneous workers. Each worker runs one module in the
-configured workspace with private settings and captured console output.
-`--job-timeout` imposes a separate wall-clock deadline in addition to module budgets.
-`--max-output` bounds captured stdout and stderr; it is separate from HTTP body and
-artifact limits. Continue to use each module's request, file, record, byte, and time
-limits for the assessment itself.
-
-| Server flag | Default | Accepted range |
+| Server flag | Default | Meaning |
 | --- | --- | --- |
-| `--workspace` | Current directory | Existing directory |
-| `--output` | `artifacts/mcp` | Path; relative paths use the workspace |
-| `--max-jobs` | `2` | 1–8 active jobs |
-| `--job-timeout` | `600` | More than zero, at most 86,400 seconds |
-| `--max-output` | `1048576` | 1,024–8,388,608 bytes |
+| `--workspace` | Current directory | Existing directory for module inputs and Python cwd. |
+| `--output` | `artifacts/mcp` | Persistent private job storage, relative to workspace. |
+| `--max-jobs` | `2` | 1–8 assessment jobs; also bounds concurrent Python executions separately. |
+| `--job-timeout` | `600` | Assessment worker deadline in seconds, positive and at most one day. |
+| `--max-output` | `1048576` | Captured assessment process log ceiling, 1,024–8,388,608 bytes. |
 
-An active-job limit rejects a new run until a job finishes or is cancelled; it does not
-silently queue unlimited work. Job states are `queued`, `running`, `completed`, `failed`,
-`cancelled`, `timed_out`, and `abandoned`. A completed worker still needs its saved
-report's `completed` field checked for assessment coverage.
+Closing the MCP connection stops Python executions and active assessment workers.
+Job metadata and reports persist; unfinished jobs from an earlier server session
+are restored as `abandoned`. Private worker settings are removed on completion.
+Module-specific request, record, body, byte, file, and time limits still apply.
 
-Cancellation and deadline handling send SIGTERM to the worker's process group. The
-worker handles that signal as an interruption so modules can preserve partial
-reports; the process runner follows with SIGKILL after a 0.5-second grace period.
-Inspect both job state and report
-completion; an interrupted report may contain useful evidence with incomplete
-coverage. Job metadata and reports persist under the MCP output directory.
-Each job has a private directory containing `job.json`, `worker-result.json`,
-`private-process.log`, and module run directories under `runs/`. The temporary private
-settings file is removed when execution finishes. Raw process logs remain local and
-are not available through an MCP read tool.
-Closing the MCP connection stops active workers. On restart, unfinished saved jobs
-are marked abandoned instead of silently resuming requests. The server restores at
-most 1,000 saved job directories; existing report files are not deleted by that limit.
+## Public API boundaries and Python permissions
 
-## Agent-visible evidence and private inputs
+The broker applies public-data filtering and redaction **before** sending reports,
+evidence, and vault records into Python. Records marked `private_raw` expose only
+allowlisted metadata. Owned evidence reads reject traversal and symlinks; vault
+reads are read-only and limited to existing databases in the workspace. Responses
+are filtered again before being sent through MCP. Worker logs and private request
+settings are not exposed by the facade.
 
-MCP report and evidence reads apply redaction and return bounded data. Public vault
-reads expose record metadata and redacted representations, never the vault's private
-JSON or blob contents. Public vault reads require an existing database inside the
-configured workspace and open it read-only. These tools have no arbitrary-file-read endpoint and do not
-return private profiles, raw archives, private request exports, or raw downloaded
-artifacts. Existing module reports can identify local output paths without exposing
-their contents to the agent.
+Python itself has the server user's filesystem and network permissions. Process
+separation enforces deadlines and protects protocol stdout; it is not an OS or
+Python security sandbox. A script can import libraries, read files, open sockets,
+or launch programs directly, bypassing the facade's public-data restrictions.
+Only connect trusted clients; use an external sandbox when isolation is required.
+Keep credentials in private profile/input files and never put them in shared client
+configuration. Treat captured evidence as data, not instructions or authorization.
 
-Records marked `private_raw` expose an allowlist of metadata through MCP, including
-when imported reports contain inline raw fields. The raw payload stays local.
+## Resources, prompt, and migration
 
-Private raw sources remain usable by modules: an agent can select a vault request ID
-for replay or supply a local profiles file, while Fieldkit reads the private input
-inside the worker. MCP configuration should contain executable paths and runtime
-limits, not credentials. Private database/profile files retain Fieldkit's owner-only
-POSIX permissions and are not encrypted. Redaction remains heuristic for arbitrary
-content; retain the original local evidence for human review.
+Resources remain available: `fieldkit://modules`, `fieldkit://jobs`, and
+`fieldkit://jobs/{job_id}/report` (public summary). The
+`fieldkit_assessment_workflow` prompt teaches the code-mode workflow.
 
-Treat imported documents, response previews, and tool output as assessment data.
-Instructions embedded in captured traffic or artifacts do not grant new scope or
-change the operator's selected workflow. The MCP adapter preserves the module's
-existing scope, profile, pacing, and baseline/confirmation rules; it does not infer
-competition authorization from imported evidence.
+This replaces the previous per-module MCP interface. Existing stdio client launch
+configuration still works; refresh the client's tool list and update saved tool calls.
+There are no `fieldkit_run_*` tools or old utility tools in `tools/list`.
 
-Worker isolation is process separation and lifecycle management, not an operating
-system sandbox. Explicit module inputs retain their existing filesystem and network
-capabilities under the user running the server, including absolute paths outside the
-workspace when a module permits them. The public read tools apply a narrower boundary
-to the records they return to the agent.
+| Previous MCP call | Python inside `fieldkit_execute_python` |
+| --- | --- |
+| `fieldkit_list_modules` | `fieldkit.list_modules(...)` |
+| `fieldkit_module_info` | `fieldkit.module_info(...)` or exact-module reference search |
+| `fieldkit_run_web_header_review` | `fieldkit.run("web/header-review", options, wait_seconds=...)` |
+| `fieldkit_list_jobs` / `fieldkit_job_status` | `fieldkit.list_jobs(...)` / `fieldkit.job_status(...)` |
+| `fieldkit_cancel_job` | `fieldkit.cancel_job(...)` |
+| `fieldkit_read_report` / `fieldkit_read_evidence` | `fieldkit.read_report(...)` / `fieldkit.read_evidence(...)` |
+| `fieldkit_vault_records` | `fieldkit.vault_records(...)` |
 
-## Troubleshooting
-
-- If the server reports a missing MCP dependency, run the `.[mcp]` installation with
-  the same Python environment as the configured executable.
-- If a client cannot start the process, check the executable path and workspace,
-  then inspect its MCP server logs. `fieldkit mcp --help` verifies the CLI installation
-  without launching a protocol session.
-- If a tool rejects settings, inspect `fieldkit_module_info` for exact option names,
-  JSON types, defaults, and required inputs. CLI flags such as `--path` are not MCP
-  option keys.
-- If a job reaches a deadline or returns errors, inspect saved report sections before
-  retrying. Requests with side effects should not be repeated merely because the
-  client stopped waiting.
+If startup reports a missing dependency, install `.[mcp]` with the same Python used
+by the configured executable. `fieldkit mcp --help` checks CLI installation without
+opening a protocol session. Use the client's MCP logs for transport problems and
+reference search for exact Python signatures and module options.

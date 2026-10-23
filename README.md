@@ -71,8 +71,9 @@ python -m pip install -e '.[mcp]'
 fieldkit mcp --help
 ```
 
-The local stdio server exposes every registered module as a typed tool, with job
-status, cancellation, redacted report/evidence reads, and public vault records.
+The local stdio server exposes two code-mode tools: Python execution and searchable
+API references. Agents compose every registered module, persistent jobs, redacted
+report/evidence reads, and public vault records through a shared `fieldkit` Python API.
 Use the [Copilot/VS Code configuration examples](examples/mcp/README.md) to connect
 your agent. The client starts the server; `fieldkit mcp --workspace /absolute/project`
 is also available directly. Network tools still require explicit target origins and

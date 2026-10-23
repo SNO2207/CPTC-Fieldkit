@@ -2,13 +2,14 @@
 
 Fieldkit has one module registry and three interfaces: `argparse` commands, a
 `prompt_toolkit` console, and an optional stdio MCP server. Option metadata supplies
-CLI flags, console settings, MCP input schemas, help text, types, and defaults.
+CLI flags, console settings, Python API option schemas, help text, types, and defaults.
 The interfaces run the same module code.
 
 ```text
 src/fieldkit/
   cli.py, console.py         command routing and interactive terminal UI
-  mcp_server.py              optional SDK protocol adapter, resources, and workflow prompt
+  mcp_server.py              two-tool code-mode protocol, resources, and workflow prompt
+  code_worker.py             fresh Python namespace and synchronous broker facade
   agent_worker.py            private-config worker executing the same module contract
   registry.py               explicit built-in registration
   core/
@@ -22,7 +23,9 @@ src/fieldkit/
     results.py              stable IDs, normalization, merge, diff, review
     local.py                LocalModule / LocalContext host and passive run lifecycle
     process.py              bounded argv-only external process runner
-    agent.py                registry-derived MCP schemas, persistent jobs, public reads
+    agent.py                registry-derived options, persistent jobs, public reads
+    code_api.py             Python facade signatures and searchable API/module references
+    codemode.py             bounded Python subprocesses and shared API broker
     xml.py                  bounded XML validation without entity/resource loading
     replay.py, workflows.py request formats, field edits, extraction/substitution
     vault.py, ingest.py      explicitly opened private SQLite graph and local imports
@@ -164,28 +167,38 @@ connectivity or application-permission test. Nuclei and browser login have separ
 transport contracts; snapshot retains its restricted browser routing. See
 [capabilities](capabilities.md) and [evidence workbenches](evidence-workbench.md).
 
-## MCP adapter
+## MCP code-mode adapter
 
-The optional MCP dependency is imported only when starting the MCP interface. The
-adapter derives a tool for each explicitly registered module and validates options
-against that module's metadata. It accepts structured settings, rather than arbitrary
-commands, and delegates execution to a separate Python worker through argv-only
-subprocess calls. Private configuration files carry request settings; credentials are
-not interpolated into process arguments. The worker runs the existing module contract,
-so scope, pacing, profile, probe confirmation, and report behavior remain in the module.
-The MCP adapter controls `OUTPUT`; agents cannot override it through module settings.
+The optional MCP SDK is imported only when starting the server. It advertises two
+stable tools: `fieldkit_execute_python` and `fieldkit_search_reference`. New modules
+extend the registry-backed Python API and reference catalog without increasing the
+MCP tool list. Exact module reference searches retrieve typed options on demand.
 
-The server manages a bounded number of jobs, wall-clock deadlines, captured output,
-status, and cancellation. Job metadata and run reports live under the configured MCP
-output directory. Shutdown cancels active workers; saved jobs can be inspected after
-restart. Report/evidence tools return bounded redacted data and public vault views.
-They do not implement arbitrary file reads or raw private-vault export. The transport
-is local stdio. Burp bridge and active ffuf jobs additionally create temporary
-loopback listeners for their selected workflows. See
-[the MCP interface](mcp.md) for client configuration and the supported tool contract.
+Each execution gets a fresh Python subprocess in the workspace with a synchronous
+`fieldkit` facade. A private stdio JSON broker routes supported API calls back to the
+same `FieldkitAgent` that owns persistent jobs. Scripts can compose calls, loops,
+imports, and filtering, then return a JSON `result` and captured print output. Only
+selected output reaches the client; intermediate API results remain in the script.
+Python variables are local to one call; jobs and saved reports persist across calls.
 
-Worker separation is not an operating-system sandbox: modules retain the permissions
-of the server user and their normal explicit input semantics. MCP public vault reads
-are narrower, read-only, and limited to existing databases in the configured workspace.
-The optional server extra supports MCP SDK `>=2.3,<3`. Ordinary CLI/console startup
-does not import the SDK.
+The broker validates method signatures, derives module option validation from the
+registry, and filters public data before sending it into the script. Assessment
+runs still use argv-only workers and private settings files, preserving module
+scope, pacing, profiles, confirmations, and report behavior. `OUTPUT` remains
+server-controlled. Script failures and deadlines retain started job IDs and do not
+roll back side effects or stop background assessments.
+
+Python execution has a 1–120 second deadline, process-group cleanup, 32 KiB source,
+16 KiB captured output, a 64 KiB response ceiling, and a 1,000-call broker budget.
+Concurrent Python calls and assessment jobs are separately bounded by `--max-jobs`.
+Closing the transport stops both kinds of worker. Assessment job metadata survives
+restart; interrupted saved jobs are restored as abandoned.
+
+This process boundary is not a security sandbox. Python retains the server user's
+filesystem and network permissions and can bypass the facade through direct imports
+and I/O. Facade report/evidence reads provide bounded redacted data, and facade vault
+reads are read-only and workspace-limited. External sandboxing is required to restrict
+arbitrary Python. Resources and the workflow prompt remain available over local
+stdio. See [the MCP interface](mcp.md) for examples, migration, and public-data limits.
+The optional server extra supports SDK `>=2.3,<3`; CLI/console startup does not
+import the SDK.

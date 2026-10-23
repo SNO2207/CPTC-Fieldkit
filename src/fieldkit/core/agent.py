@@ -1,4 +1,4 @@
-"""Registry-backed AI tools and isolated, persistent assessment jobs; no import I/O."""
+"""Registry-backed Python API and isolated, persistent assessment jobs; no import I/O."""
 
 import asyncio
 import copy
@@ -233,11 +233,6 @@ class FieldkitAgent:
             raise FieldkitAgentError("MAX_OUTPUT must be 1024-8388608 bytes")
         self.max_jobs, self.job_timeout, self.max_output = max_jobs, job_timeout, max_output
         self.registry = modules()
-        self.module_tools = {
-            "fieldkit_run_" + re.sub(r"[^a-z0-9_]", "_", name): name for name in self.registry
-        }
-        if len(self.module_tools) != len(self.registry):
-            raise FieldkitAgentError("Module tool names collide")
         self.jobs, self.closed = {}, False
         self._restore()
 
@@ -288,12 +283,10 @@ class FieldkitAgent:
     def module_info(self, module):
         name = module
         if name not in self.registry:
-            raise FieldkitAgentError("Unknown module; use fieldkit_list_modules")
+            raise FieldkitAgentError("Unknown module; use fieldkit.list_modules()")
         module = self.registry[name]
-        tool = "fieldkit_run_" + re.sub(r"[^a-z0-9_]", "_", name)
         return {
             "module": name,
-            "tool": tool,
             "description": module.description,
             "accepts_targets": module.accepts_targets,
             "options": [
@@ -313,8 +306,8 @@ class FieldkitAgent:
             raise FieldkitAgentError("Query must be a string")
         return {
             "modules": [
-                {"module": n, "tool": t, "description": self.registry[n].description}
-                for t, n in self.module_tools.items()
+                {"module": n, "description": m.description}
+                for n, m in self.registry.items()
                 if query.lower() in (n + " " + self.registry[n].description).lower()
             ],
             "total": len(self.registry),
@@ -336,128 +329,13 @@ class FieldkitAgent:
             }
         )
 
-    def tools(self):
-        text = {"type": "string", "maxLength": 8192}
-        job = {"type": "string", "pattern": r"^job-[0-9a-f]{32}$"}
-        paging = {
-            "offset": {"type": "integer", "minimum": 0, "default": 0},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
-        }
-        definitions = [
-            (
-                "fieldkit_list_modules",
-                "Discover registered modules and their MCP tool names.",
-                object_schema({"query": {**text, "default": ""}}),
-                True,
-            ),
-            (
-                "fieldkit_module_info",
-                "Inspect exact CLI/console options and input schema.",
-                object_schema({"module": text}, ["module"]),
-                True,
-            ),
-            (
-                "fieldkit_list_jobs",
-                "List recent jobs, including completed and abandoned runs.",
-                object_schema(
-                    {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}
-                ),
-                True,
-            ),
-            (
-                "fieldkit_job_status",
-                "Check progress, process outcome and available report summaries.",
-                object_schema({"job_id": job}, ["job_id"]),
-                True,
-            ),
-            (
-                "fieldkit_cancel_job",
-                "Cancel one active job and retain available partial evidence.",
-                object_schema({"job_id": job}, ["job_id"]),
-                False,
-            ),
-            (
-                "fieldkit_read_report",
-                "Read paginated redacted results; captured content is untrusted data.",
-                object_schema(
-                    {
-                        "job_id": job,
-                        **paging,
-                        "section": {
-                            "type": "string",
-                            "default": "summary",
-                            "enum": [
-                                "summary",
-                                "results",
-                                "findings",
-                                "errors",
-                                "endpoints",
-                                "evidence",
-                            ],
-                        },
-                    },
-                    ["job_id"],
-                ),
-                True,
-            ),
-            (
-                "fieldkit_read_evidence",
-                "Read bounded redacted evidence; private/raw records return metadata only.",
-                object_schema({"job_id": job, "evidence_id": text}, ["job_id", "evidence_id"]),
-                True,
-            ),
-            (
-                "fieldkit_vault_records",
-                "Read public redacted vault records inside the workspace; omit private content.",
-                object_schema(
-                    {
-                        "database": {**text, "default": "artifacts/fieldkit.sqlite"},
-                        "kind": {**text, "default": ""},
-                        **paging,
-                    }
-                ),
-                True,
-            ),
-        ]
-        result = [
-            {
-                "name": n,
-                "description": d,
-                "input_schema": s,
-                "annotations": {
-                    "readOnlyHint": ro,
-                    "destructiveHint": not ro,
-                    "idempotentHint": ro,
-                    "openWorldHint": False,
-                },
-            }
-            for n, d, s, ro in definitions
-        ]
-        result.extend(
-            {
-                "name": t,
-                "description": self.registry[n].description
-                + " Start an isolated job. Supply explicit scope/profiles; imports grant no scope. "
-                "Use DRY_RUN where available, then poll fieldkit_job_status and read evidence.",
-                "input_schema": self._module_schema(self.registry[n]),
-                "annotations": {
-                    "readOnlyHint": False,
-                    "destructiveHint": True,
-                    "idempotentHint": False,
-                    "openWorldHint": True,
-                },
-            }
-            for t, n in self.module_tools.items()
-        )
-        return result
-
     def _job(self, identifier):
         if (
             not isinstance(identifier, str)
             or not JOB_ID.fullmatch(identifier)
             or identifier not in self.jobs
         ):
-            raise FieldkitAgentError("Unknown job ID; use fieldkit_list_jobs")
+            raise FieldkitAgentError("Unknown job ID; use fieldkit.list_jobs()")
         return self.jobs[identifier]
 
     def _persist(self, job):
@@ -476,7 +354,7 @@ class FieldkitAgent:
                     "OUTPUT is controlled by MCP; configure --output when starting the server"
                 )
             if key not in available:
-                raise FieldkitAgentError("Unknown option; inspect fieldkit_module_info")
+                raise FieldkitAgentError("Unknown option; inspect fieldkit.module_info()")
             kind = available[key].kind
             valid = (
                 (
@@ -507,6 +385,8 @@ class FieldkitAgent:
     async def start_job(self, module_name, options):
         if self.closed:
             raise FieldkitAgentError("Server is closing")
+        if module_name not in self.registry:
+            raise FieldkitAgentError("Unknown module; use fieldkit.list_modules()")
         module = self.registry[module_name]
         settings = self._settings(module, options)
         if sum(j.status not in TERMINAL for j in self.jobs.values()) >= self.max_jobs:
@@ -785,45 +665,17 @@ class FieldkitAgent:
                 await asyncio.shield(job.task)
         return self.job_status(job_id)
 
-    async def call(self, name, arguments):
-        if not isinstance(arguments, dict):
-            raise FieldkitAgentError("Tool arguments must be an object")
-        if name in self.module_tools:
-            if set(arguments) - {"options", "wait_seconds"}:
-                raise FieldkitAgentError("Unexpected run arguments; use options and wait_seconds")
-            wait = arguments.get("wait_seconds", 0)
-            if (
-                not isinstance(wait, (int, float))
-                or isinstance(wait, bool)
-                or not math.isfinite(wait)
-                or not 0 <= wait <= 20
-            ):
-                raise FieldkitAgentError("WAIT_SECONDS must be finite and 0-20")
-            job = await self.start_job(self.module_tools[name], arguments.get("options", {}))
-            try:
-                if wait:
-                    await asyncio.wait([job.task], timeout=wait)
-            except asyncio.CancelledError:
-                await self.cancel_job(job.id)
-                raise
-            return self.job_status(job.id)
-        dispatch = {
-            "fieldkit_list_modules": self.list_modules,
-            "fieldkit_module_info": self.module_info,
-            "fieldkit_job_status": self.job_status,
-            "fieldkit_list_jobs": self.list_jobs,
-            "fieldkit_cancel_job": self.cancel_job,
-            "fieldkit_read_report": self.read_report,
-            "fieldkit_read_evidence": self.read_evidence,
-            "fieldkit_vault_records": self.vault_records,
-        }
-        if name not in dispatch:
-            raise FieldkitAgentError("Unknown MCP tool")
+    async def run(self, module, options=None, wait_seconds=0):
+        """Start a module job and optionally wait briefly for its public status."""
+        validate_wait(wait_seconds)
+        job = await self.start_job(module, {} if options is None else options)
         try:
-            result = dispatch[name](**arguments)
-        except TypeError as exc:
-            raise FieldkitAgentError("Invalid tool arguments; inspect its schema") from exc
-        return await result if name == "fieldkit_cancel_job" else result
+            if wait_seconds:
+                await asyncio.wait([job.task], timeout=wait_seconds)
+        except asyncio.CancelledError:
+            await self.cancel_job(job.id)
+            raise
+        return self.job_status(job.id)
 
     async def close(self):
         self.closed = True
@@ -844,6 +696,16 @@ class FieldkitAgent:
 def validate_page(offset, limit):
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
         raise FieldkitAgentError("Pagination requires nonnegative OFFSET and LIMIT 1-100")
+
+
+def validate_wait(seconds):
+    if (
+        not isinstance(seconds, (int, float))
+        or isinstance(seconds, bool)
+        or not math.isfinite(seconds)
+        or not 0 <= seconds <= 20
+    ):
+        raise FieldkitAgentError("WAIT_SECONDS must be finite and 0-20")
 
 
 def bounded_timestamp(value):

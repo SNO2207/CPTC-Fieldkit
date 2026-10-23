@@ -36,20 +36,18 @@ def saved_job(agent, tmp_path, report):
     return job, run
 
 
-def test_registry_tools_match_options_and_public_errors(tmp_path):
+def test_registry_python_api_matches_options_and_public_errors(tmp_path):
     agent = FieldkitAgent(tmp_path)
     assert not agent.output.exists()
-    tools = {t["name"]: t for t in agent.tools()}
-    assert len(tools) == len(agent.registry) + 8
     for name, module in agent.registry.items():
-        tool = tools[agent.module_info(name)["tool"]]
-        options = tool["input_schema"]["properties"]["options"]
+        info = agent.module_info(name)
+        options = info["input_schema"]["properties"]["options"]
         assert set(options["properties"]) == {o.name for o in module.options} - {"OUTPUT"}
         assert options["additionalProperties"] is False
-        assert tool["annotations"]["readOnlyHint"] is False
-    assert tools["fieldkit_read_evidence"]["annotations"]["readOnlyHint"] is True
-    result = asyncio.run(agent.call("fieldkit_module_info", {"module": "web/header-review"}))
+        assert "tool" not in info
+    result = agent.module_info("web/header-review")
     assert result["module"] == "web/header-review"
+    assert len(agent.list_modules()["modules"]) == len(agent.registry)
     with pytest.raises(FieldkitAgentError, match="Unknown job"):
         agent.job_status("../../private")
 
@@ -72,7 +70,7 @@ def test_registry_tools_match_options_and_public_errors(tmp_path):
 def test_invalid_options_do_not_launch_or_echo_inputs(tmp_path, options):
     agent = FieldkitAgent(tmp_path)
     with pytest.raises(FieldkitAgentError) as error:
-        asyncio.run(agent.call("fieldkit_run_web_header_review", {"options": options}))
+        asyncio.run(agent.run("web/header-review", options=options))
     assert "private-value" not in str(error.value)
     assert "unknown-secret-name" not in str(error.value)
     assert not agent.output.exists()
@@ -97,13 +95,10 @@ def test_private_settings_argv_limits_and_close(tmp_path, monkeypatch):
 
     async def exercise():
         agent = FieldkitAgent(tmp_path, max_jobs=1)
-        run = await agent.call(
-            "fieldkit_run_web_header_review",
-            {"options": {"PROFILE": "private-profile-name"}},
-        )
+        run = await agent.run("web/header-review", options={"PROFILE": "private-profile-name"})
         await asyncio.wait_for(started.wait(), 1)
         with pytest.raises(FieldkitAgentError, match="Active job limit"):
-            await agent.call("fieldkit_run_web_header_review", {})
+            await agent.run("web/header-review")
         await agent.close()
         status = agent.job_status(run["job_id"])
         assert status["status"] == "cancelled"
@@ -154,22 +149,14 @@ def test_real_offline_worker_preserves_private_vault_and_redacted_report(tmp_pat
     async def exercise():
         agent = FieldkitAgent(tmp_path)
         try:
-            run = await agent.call(
-                "fieldkit_run_evidence_ingest",
-                {
-                    "options": {
-                        "INPUT": [source.name],
-                        "FORMAT": "har",
-                        "DATABASE": "vault.sqlite",
-                    },
-                    "wait_seconds": 20,
-                },
+            run = await agent.run(
+                "evidence/ingest",
+                options={"INPUT": [source.name], "FORMAT": "har", "DATABASE": "vault.sqlite"},
+                wait_seconds=20,
             )
             assert run["status"] == "completed", run
             assert run["report_available"]
-            report = await agent.call(
-                "fieldkit_read_report", {"job_id": run["job_id"], "section": "results"}
-            )
+            report = agent.read_report(run["job_id"], section="results")
             records = agent.vault_records("vault.sqlite", "request")
             assert records["total"] == 1
             public = json.dumps([run, report, records])
@@ -197,9 +184,9 @@ def test_real_http_job_cancel_and_deadline_save_partial_report(tmp_path, deadlin
         async def exercise():
             agent = FieldkitAgent(tmp_path, job_timeout=2 if deadline else 10)
             try:
-                run = await agent.call(
-                    "fieldkit_run_web_header_review",
-                    {"options": {"TARGETS": [target], "RATE": 0, "TIMEOUT": 9, "RETRIES": 0}},
+                run = await agent.run(
+                    "web/header-review",
+                    options={"TARGETS": [target], "RATE": 0, "TIMEOUT": 9, "RETRIES": 0},
                 )
                 async with asyncio.timeout(5):
                     while not seen:
@@ -470,12 +457,10 @@ def test_real_comparison_report_preserves_change_types(tmp_path):
     async def exercise():
         agent = FieldkitAgent(tmp_path)
         try:
-            status = await agent.call(
-                "fieldkit_run_results_compare",
-                {
-                    "options": {"BEFORE": before.name, "AFTER": after.name},
-                    "wait_seconds": 20,
-                },
+            status = await agent.run(
+                "results/compare",
+                options={"BEFORE": before.name, "AFTER": after.name},
+                wait_seconds=20,
             )
             assert status["status"] == "completed"
             assert "report_read_error" not in status
