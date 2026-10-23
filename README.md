@@ -182,6 +182,7 @@ Detailed usage:
 - [Private request vault, correlation, artifact workbenches, and reporting](docs/evidence-workbench.md)
 - [MCP tools for Copilot and other AI agents](docs/mcp.md)
 - [Parameter discovery, JWT checks, selected Burp captures, and ffuf](docs/agent-assessment-tools.md)
+- [Remaining validation, recommended additions, and tooling](docs/next-steps.md)
 - [Architecture and module authoring](docs/architecture.md)
 
 ## Chain modules through an inventory
